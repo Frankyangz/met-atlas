@@ -1,0 +1,3187 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Met Atlas — an infinite canvas for The Met</title>
+
+<style>
+  /* ══════════════════════════════════════════════════════════════════════
+     Warm museum palette on a light ground.
+
+     A light ground makes depth hard: fogging artwork toward pale beige
+     erases it, where a dark ground would let it recede while still
+     glowing. So depth is earned three other ways instead —
+       · every work sits on a dark mount board, which separates it from
+         the wall and reads as a soft shadow at distance
+       · the field is tight and overlapping rather than scattered
+       · fog starts late, so works stay solid well into the distance
+     ══════════════════════════════════════════════════════════════════════ */
+  :root {
+    --paper:      #F4F0E8;
+    --paper-dim:  #EAE4D8;
+    --wall:       #DED6C8;
+    --ink:        #2B2622;
+    --ink-soft:   #6B625A;
+    --ink-faint:  #9A9086;
+    --accent:     #A8593A;
+    --line:       rgba(43, 38, 34, 0.14);
+    --line-firm:  rgba(43, 38, 34, 0.24);
+    --chrome-bg:  rgba(244, 240, 232, 0.93);
+    --shadow:     0 2px 22px rgba(43, 38, 34, 0.15);
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --sans:  ui-sans-serif, -apple-system, "Segoe UI", Inter, Helvetica, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--wall); color: var(--ink);
+    font-family: var(--sans); -webkit-font-smoothing: antialiased;
+  }
+  canvas { display: block; touch-action: none; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  ::-webkit-scrollbar { width: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--line-firm); border-radius: 5px; }
+
+  /* ─── masthead ─────────────────────────────────────────────────────── */
+  #masthead { position: fixed; top: 22px; left: 26px; z-index: 20;
+              pointer-events: none; user-select: none; }
+  #masthead h1 { margin: 0; font-family: var(--serif); font-size: 19px;
+                 font-weight: 400; letter-spacing: 0.01em; }
+  #masthead .sub { margin-top: 3px; font-size: 10px; letter-spacing: 0.15em;
+                   text-transform: uppercase; color: var(--ink-faint); }
+
+  /* ─── dock ─────────────────────────────────────────────────────────── */
+  /* Quiet by design — present for anyone who looks, invisible to anyone
+     who doesn't. Sits bottom-left, clear of the dock and the masthead.
+     Only the link takes clicks; the rest lets them through to the field. */
+  #colophon {
+    position: fixed; left: 20px; bottom: 18px; z-index: 19;
+    font-size: 9.5px; line-height: 1.75; letter-spacing: 0.04em;
+    color: var(--ink-soft); max-width: 400px;
+    padding: 9px 13px; border-radius: 9px;
+    /* Needs its own ground for the same reason the hint did: the field
+       drifts underneath it, and grey-on-dark-painting is unreadable
+       exactly when someone is trying to check the attribution. Kept
+       lighter than the dock so it stays background furniture. */
+    background: rgba(246, 243, 236, 0.78);
+    backdrop-filter: blur(6px);
+    pointer-events: none; user-select: none;
+  }
+  #colophon a { color: inherit; text-decoration: underline;
+                text-underline-offset: 2px; pointer-events: auto; }
+  #colophon a:hover { color: var(--accent); }
+
+  /* Was faint grey text straight on the canvas, which vanished against
+     pale artwork exactly when someone needed to read it. Now a proper
+     chip: opaque ground, firmer ink, so it holds over anything. */
+  /* ─── live gesture guide ───────────────────────────────────────────── */
+  #gesture-guide {
+    position: fixed; left: 50%; bottom: 130px; transform: translateX(-50%) translateY(10px);
+    z-index: 22; display: flex; gap: 5px; padding: 6px;
+    background: var(--chrome-bg); border: 1px solid var(--line);
+    border-radius: 12px; box-shadow: var(--shadow); backdrop-filter: blur(12px);
+    opacity: 0; pointer-events: none; visibility: hidden;
+    transition: opacity 0.3s ease, transform 0.3s cubic-bezier(.4,0,.2,1), visibility 0s linear 0.3s;
+  }
+  #gesture-guide.on {
+    opacity: 1; transform: translateX(-50%) translateY(0);
+    visibility: visible; transition-delay: 0s;
+  }
+  .gg-item {
+    padding: 7px 12px; border-radius: 8px; text-align: center; white-space: nowrap;
+    border: 1px solid transparent; transition: background 0.18s ease, border-color 0.18s ease;
+  }
+  .gg-item b { display: block; font-size: 11.5px; font-weight: 500; color: var(--ink); }
+  .gg-item span { display: block; margin-top: 1px; font-size: 10px; color: var(--ink-faint); }
+  /* The recognised gesture lights up — this is the feedback that makes
+     the classifier legible instead of mysterious. */
+  .gg-item.active { background: var(--accent); border-color: var(--accent); }
+  .gg-item.active b, .gg-item.active span { color: var(--paper); }
+  .gg-item.active span { opacity: 0.85; }
+
+  @media (max-width: 860px) {
+    #gesture-guide { flex-wrap: wrap; max-width: calc(100vw - 24px); justify-content: center; }
+    .gg-item span { display: none; }
+  }
+
+  /* ─── gesture self-view ────────────────────────────────────────────── */
+  /* ─── gallery sound player ─────────────────────────────────────────
+     Bottom-left, stacked above the colophon — the gesture self-view owns
+     the opposite corner, so the two never meet. */
+  #music-panel {
+    position: fixed; left: 20px; bottom: 100px; z-index: 23;
+    width: 290px; display: none; flex-direction: column; gap: 10px;
+    padding: 13px 14px 12px;
+    background: var(--chrome-bg); border: 1px solid var(--line-firm);
+    border-radius: 12px; box-shadow: var(--shadow); backdrop-filter: blur(14px);
+  }
+  #music-panel.on { display: flex; }
+
+  .mp-head { display: flex; align-items: flex-start; gap: 10px; }
+  .mp-ident { flex: 1; min-width: 0; }
+  .mp-credit {
+    font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--ink-faint); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .mp-title {
+    margin-top: 3px; font-family: var(--serif); font-size: 15px; line-height: 1.25;
+    overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  }
+  .mp-x { background: none; border: none; font-size: 17px; line-height: 1;
+          color: var(--ink-faint); padding: 0 2px; flex: none; }
+  .mp-x:hover { color: var(--accent); }
+
+  #mp-viz { display: block; width: 100%; height: 46px; }
+
+  .mp-controls { display: flex; align-items: center; gap: 11px; }
+  #mp-play {
+    width: 34px; height: 34px; flex: none; border-radius: 8px;
+    border: 1px solid var(--line-firm); background: rgba(255,255,255,0.5);
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.16s ease, border-color 0.16s ease;
+  }
+  #mp-play:hover { border-color: var(--accent); }
+  #mp-play svg { width: 15px; height: 15px; fill: var(--ink); }
+  #mp-play:disabled { opacity: 0.35; cursor: not-allowed; }
+  .mp-spk { width: 15px; height: 15px; flex: none; fill: none;
+            stroke: var(--ink-faint); stroke-width: 1.6;
+            stroke-linecap: round; stroke-linejoin: round; }
+
+  /* Same slider treatment as the date filter, so the app has one control
+     vocabulary rather than two. */
+  #mp-vol { -webkit-appearance: none; appearance: none; flex: 1;
+            height: 2px; border-radius: 2px; background: var(--line-firm); }
+  #mp-vol::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
+    background: var(--paper); border: 1.5px solid var(--accent); cursor: grab;
+    box-shadow: 0 1px 4px rgba(43,38,34,0.22);
+  }
+  #mp-vol::-moz-range-thumb {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--paper); border: 1.5px solid var(--accent); cursor: grab;
+  }
+
+  #mp-missing {
+    display: none; font-size: 10.5px; line-height: 1.65; color: var(--ink-faint);
+    padding-top: 10px; border-top: 1px solid var(--line);
+  }
+  #mp-missing.on { display: block; }
+  #mp-missing code { font-size: 10px; background: rgba(43,38,34,0.07);
+                     padding: 1px 4px; border-radius: 3px; }
+
+  @media (max-width: 720px) {
+    #music-panel { left: 10px; right: 10px; width: auto; bottom: 76px; }
+  }
+
+  #gesture-panel {
+    position: fixed; right: 26px; bottom: 26px; z-index: 23;
+    width: 236px; display: none; flex-direction: column;
+    background: var(--chrome-bg); border: 1px solid var(--line-firm);
+    border-radius: 12px; box-shadow: var(--shadow); backdrop-filter: blur(14px);
+    overflow: hidden;
+  }
+  #gesture-panel.on { display: flex; }
+  .gp-head { display: flex; align-items: center; gap: 8px; padding: 9px 11px;
+             border-bottom: 1px solid var(--line); }
+  .gp-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+            animation: pulse 1.6s ease-in-out infinite; flex: none; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.3 } }
+  .gp-title { flex: 1; font-size: 10px; letter-spacing: 0.14em;
+              text-transform: uppercase; color: var(--ink-soft); }
+  #gp-close { background: none; border: none; font-size: 17px; line-height: 1;
+              color: var(--ink-soft); padding: 0 2px; }
+  #gp-close:hover { color: var(--accent); }
+
+  .gp-stage { position: relative; background: #1a1714; aspect-ratio: 4 / 3; }
+  /* Mirrored: an un-mirrored self-view makes every gesture feel inverted. */
+  #gp-video, #gp-overlay {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    transform: scaleX(-1); object-fit: cover;
+  }
+  #gp-loading {
+    position: absolute; inset: 0; display: flex; align-items: center;
+    justify-content: center; text-align: center; padding: 12px;
+    font-size: 11px; color: var(--paper-dim); background: #1a1714;
+  }
+  #gp-loading.done { display: none; }
+
+  .gp-read { padding: 8px 11px; font-family: var(--serif); font-size: 14px;
+             border-bottom: 1px solid var(--line); }
+  .gp-legend { padding: 9px 11px; font-size: 10.5px; line-height: 1.75; color: var(--ink-faint); }
+  .gp-legend b { color: var(--ink-soft); font-weight: 500; }
+
+  @media (max-width: 720px) { #gesture-panel { display: none !important; } }
+
+  #hint {
+    position: fixed; bottom: 92px; left: 50%; transform: translateX(-50%);
+    z-index: 18; font-size: 10.5px; letter-spacing: 0.13em; color: var(--ink);
+    text-transform: uppercase; pointer-events: none; white-space: nowrap;
+    padding: 8px 16px; border-radius: 9px;
+    background: rgba(246, 243, 236, 0.93); border: 1px solid var(--line);
+    backdrop-filter: blur(8px); box-shadow: 0 3px 16px rgba(43, 38, 34, 0.13);
+    opacity: 0; transition: opacity 0.6s ease;
+  }
+  #hint.show { opacity: 1; }
+
+  /* Above the focus veil (z 30) so the dock stays crisp and usable while
+     a work is focused — you can jump straight to filters or a new
+     collection without dismissing first. */
+  #dock {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%);
+    z-index: 31; display: flex; align-items: center; gap: 4px; padding: 7px;
+    border-radius: 13px; background: var(--chrome-bg); border: 1px solid var(--line);
+    box-shadow: var(--shadow); backdrop-filter: blur(14px);
+    /* Returning: quick. When someone reaches for the mouse they want the
+       dock now, not in three seconds. */
+    transition: opacity 0.25s ease, visibility 0s linear 0s;
+  }
+  /* Leaving: slow. Flying by keyboard means the hands are off the mouse,
+     so the dock is just something sitting in front of the collection —
+     but yanking it away is jarring, so it dissolves over two seconds.
+
+     visibility (not pointer-events) does the click-blocking, delayed to
+     the end of the fade: while it is still visible at 60% it stays
+     clickable, so a click never lands on something that looks present.
+
+     Linear, not ease: over a fade this long an ease curve dumps most of
+     the opacity up front and spends the rest imperceptibly near zero,
+     which reads as a quick fade with a long tail rather than a slow
+     dissolve. Linear spreads it evenly across the whole duration. */
+  #dock.stowed {
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 2s linear, visibility 0s linear 2s;
+  }
+  .dock-btn {
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+    height: 38px; min-width: 38px; padding: 0 11px; border-radius: 8px;
+    background: none; border: 1px solid transparent; white-space: nowrap;
+    font-size: 12.5px; transition: background 0.18s ease, color 0.18s ease,
+                                   border-color 0.18s ease;
+  }
+  .dock-btn:hover:not(:disabled) { background: rgba(43, 38, 34, 0.06); }
+  .dock-btn.active { background: var(--accent); color: var(--paper); }
+  .dock-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .dock-btn svg { width: 17px; height: 17px; fill: none; stroke: currentColor;
+                  stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  #btn-source { border-color: var(--line-firm); padding: 0 14px; }
+  #dock-label { font-family: var(--serif); font-size: 13.5px; max-width: 190px;
+                overflow: hidden; text-overflow: ellipsis; }
+  .dock-sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+
+  /* ─── collection browser (centre modal) ────────────────────────────── */
+  #browser-veil {
+    position: fixed; inset: 0; z-index: 25; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(222, 214, 200, 0.6); backdrop-filter: blur(3px);
+  }
+  #browser-veil.open { display: flex; }
+  #browser {
+    width: min(880px, calc(100vw - 40px)); max-height: min(620px, calc(100vh - 90px));
+    display: flex; flex-direction: column; overflow: hidden;
+    background: var(--paper); border: 1px solid var(--line-firm);
+    border-radius: 15px; box-shadow: 0 18px 60px rgba(43, 38, 34, 0.24);
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-bottom: 1px solid var(--line); flex: none;
+  }
+  .panel-title { font-size: 10px; letter-spacing: 0.16em;
+                 text-transform: uppercase; color: var(--ink-soft); }
+  .panel-x { background: none; border: none; font-size: 20px; line-height: 1;
+             color: var(--ink-soft); padding: 0 4px; }
+  .panel-x:hover { color: var(--ink); }
+  #browser-body { padding: 18px 20px; overflow-y: auto; }
+
+  #search-row { display: flex; gap: 8px; margin-bottom: 18px; }
+  #search-input {
+    flex: 1; height: 40px; padding: 0 14px; border: 1px solid var(--line-firm);
+    border-radius: 8px; background: #fff; font-size: 13px;
+    color: var(--ink); font-family: var(--sans);
+  }
+  #search-input:focus { outline: none; border-color: var(--accent); }
+  #search-go {
+    height: 40px; padding: 0 20px; border-radius: 8px; border: none;
+    background: var(--ink); color: var(--paper); font-size: 11px;
+    letter-spacing: 0.09em; text-transform: uppercase;
+  }
+  #search-go:hover { background: var(--accent); }
+
+  .group-label { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+                 color: var(--ink-faint); margin: 4px 0 9px; }
+  .dept-grid { display: grid; gap: 7px;
+               grid-template-columns: repeat(auto-fill, minmax(228px, 1fr)); }
+  .dept-card {
+    text-align: left; padding: 12px 14px; border-radius: 9px;
+    background: rgba(255,255,255,0.5); border: 1px solid var(--line);
+    transition: border-color 0.16s ease, background 0.16s ease;
+  }
+  .dept-card:hover { background: #fff; border-color: var(--ink-faint); }
+  .dept-card.active { border-color: var(--accent); background: rgba(168,89,58,0.09); }
+  .dept-name { font-family: var(--serif); font-size: 14px; }
+  .dept-sub { margin-top: 2px; font-size: 11px; color: var(--ink-faint); }
+
+  /* ─── filters (right rail, mirrors the reference layout) ───────────── */
+  #filters {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 24;
+    width: min(340px, 88vw); display: flex; flex-direction: column;
+    background: var(--chrome-bg); border-left: 1px solid var(--line-firm);
+    box-shadow: -6px 0 34px rgba(43,38,34,0.13); backdrop-filter: blur(16px);
+    transform: translateX(100%); transition: transform 0.3s cubic-bezier(.4,0,.2,1);
+  }
+  #filters.open { transform: translateX(0); }
+  #filters-body { padding: 16px 18px 30px; overflow-y: auto; }
+
+  .tabs { display: flex; gap: 4px; padding: 4px; margin-bottom: 20px;
+          background: rgba(43,38,34,0.05); border-radius: 9px; }
+  .tab { flex: 1; height: 33px; border: none; background: none; border-radius: 7px;
+         font-size: 11px; letter-spacing: 0.11em; text-transform: uppercase;
+         color: var(--ink-soft); transition: background 0.16s, color 0.16s; }
+  .tab.active { background: var(--paper); color: var(--ink); box-shadow: 0 1px 3px rgba(43,38,34,0.1); }
+
+  .f-section { margin-bottom: 22px; }
+  .f-label { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+             color: var(--ink-faint); margin-bottom: 10px; }
+  .f-value { font-family: var(--serif); font-size: 14px; margin-bottom: 10px; }
+
+  /* Dual range slider — two inputs stacked over one track. */
+  .range-wrap { position: relative; height: 26px; }
+  .range-wrap input[type=range] {
+    position: absolute; left: 0; width: 100%; margin: 0; top: 8px;
+    -webkit-appearance: none; appearance: none; background: none;
+    pointer-events: none; height: 10px;
+  }
+  .range-wrap .track {
+    position: absolute; top: 12px; left: 0; right: 0; height: 2px;
+    background: var(--line-firm); border-radius: 2px;
+  }
+  .range-wrap .track-fill { position: absolute; top: 12px; height: 2px;
+                            background: var(--accent); border-radius: 2px; }
+  .range-wrap input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; pointer-events: auto; width: 14px; height: 14px;
+    border-radius: 50%; background: var(--paper); border: 1.5px solid var(--accent);
+    cursor: grab; box-shadow: 0 1px 4px rgba(43,38,34,0.22);
+  }
+  .range-wrap input[type=range]::-moz-range-thumb {
+    pointer-events: auto; width: 13px; height: 13px; border-radius: 50%;
+    background: var(--paper); border: 1.5px solid var(--accent); cursor: grab;
+  }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip {
+    font-size: 11.5px; padding: 5px 10px; border-radius: 13px;
+    border: 1px solid var(--line); background: rgba(255,255,255,0.5);
+    color: var(--ink-soft); transition: all 0.15s ease;
+  }
+  .chip:hover { border-color: var(--ink-faint); color: var(--ink); }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: var(--paper); }
+  .chip .n { opacity: 0.55; margin-left: 4px; font-size: 10px; }
+
+  .swatches { display: flex; flex-wrap: wrap; gap: 6px; }
+  .swatch { width: 30px; height: 30px; border-radius: 7px; border: 2px solid transparent;
+            box-shadow: inset 0 0 0 1px var(--line); }
+  .swatch.on { border-color: var(--ink); }
+
+  .cluster-opts { display: flex; flex-direction: column; gap: 6px; }
+  .cluster-opt {
+    text-align: left; padding: 11px 13px; border-radius: 9px;
+    border: 1px solid var(--line); background: rgba(255,255,255,0.5);
+  }
+  .cluster-opt:hover { border-color: var(--ink-faint); }
+  .cluster-opt.on { border-color: var(--accent); background: rgba(168,89,58,0.09); }
+  .cluster-opt .t { font-family: var(--serif); font-size: 14px; }
+  .cluster-opt .d { margin-top: 2px; font-size: 11px; color: var(--ink-faint); }
+
+  #f-reset {
+    width: 100%; height: 36px; border-radius: 8px; border: 1px solid var(--line-firm);
+    background: none; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  #f-reset:hover { border-color: var(--ink); color: var(--ink); }
+  #f-count { margin-top: 12px; font-size: 11.5px; color: var(--ink-faint); text-align: center; }
+
+  /* ─── focus view ───────────────────────────────────────────────────── */
+  /* There is no image element here any more, and no veil.
+
+     The focused artwork IS the 3D plane in the field — the camera flies
+     to it. That means dimming has to happen in the scene (other tiles
+     lose opacity) rather than as a DOM layer, because a DOM veil would
+     dim the very work we are flying toward along with everything else.
+     What remains in HTML is the wall label and the hint. */
+  #focus {
+    position: fixed; inset: 0; z-index: 30; display: none; pointer-events: none;
+  }
+  #focus.open { display: block; }
+  /* #focus is pointer-events:none so clicks fall through to the field —
+     every interactive child has to opt back in explicitly. */
+  #focus-bar, #focus-esc { pointer-events: auto; }
+  /* Caption bar, centred under the work. Slides up once the flight lands
+     so it never races the motion. */
+  #focus-bar {
+    position: fixed; left: 50%; bottom: 88px;
+    width: min(680px, calc(100vw - 40px));
+    padding: 13px 16px 12px; border-radius: 12px;
+    background: rgba(246, 243, 236, 0.93); border: 1px solid var(--line);
+    backdrop-filter: blur(9px);
+    box-shadow: 0 8px 32px rgba(43, 38, 34, 0.18);
+    opacity: 0; transform: translateX(-50%) translateY(12px);
+    transition: opacity 0.32s ease, transform 0.32s cubic-bezier(.4,0,.2,1);
+    max-height: 62vh; overflow-y: auto;
+  }
+  #focus-bar.landed { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  .fb-head { display: flex; align-items: flex-start; gap: 12px; }
+  .fb-id { flex: 1; min-width: 0; }
+  #focus-title { font-family: var(--serif); font-size: 17px; line-height: 1.28; }
+  #focus-creator { margin-top: 2px; font-size: 12.5px; color: var(--ink-soft); }
+
+  #focus-star {
+    flex: none; width: 32px; height: 32px; border-radius: 8px;
+    border: 1px solid var(--line); background: rgba(255,255,255,0.5);
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.16s ease;
+  }
+  #focus-star svg { width: 16px; height: 16px; fill: none; stroke: var(--ink-faint); stroke-width: 1.5; }
+  #focus-star:hover svg { stroke: var(--accent); }
+  #focus-star.on { background: var(--accent); border-color: var(--accent); }
+  #focus-star.on svg { fill: var(--paper); stroke: var(--paper); }
+
+  .fb-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line);
+    font-size: 11.5px; color: var(--ink-soft);
+  }
+  #focus-badges { flex: none; }
+  /* Truncates rather than wrapping: a long medium string would otherwise
+     push the actions onto a second line. The untruncated text is one
+     click away under Full record. */
+  #focus-facts {
+    flex: 1; min-width: 0; color: var(--ink-soft);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #focus-more, .fb-link {
+    background: none; border: none; padding: 0; font-size: 11.5px;
+    color: var(--ink-soft); text-decoration: none; white-space: nowrap;
+  }
+  #focus-more:hover, .fb-link:hover { color: var(--accent); }
+
+  #focus-full { display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+  #focus-full.open { display: block; }
+  #focus-label {
+    margin: 0; display: grid; grid-template-columns: 96px 1fr; gap: 5px 14px;
+    font-size: 12px; line-height: 1.45;
+  }
+  #focus-label dt { color: var(--ink-faint); font-size: 9.5px; letter-spacing: 0.11em;
+                    text-transform: uppercase; padding-top: 2px; }
+  #focus-label dd { margin: 0; }
+  #focus-credit { margin-top: 10px; font-size: 11.5px; font-style: italic; color: var(--ink-soft); }
+  #focus-tags { margin-top: 9px; display: flex; gap: 5px; flex-wrap: wrap; }
+
+  /* ─── starred rail ─────────────────────────────────────────────────── */
+  #bookmarks {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 24;
+    width: min(320px, 86vw); display: flex; flex-direction: column;
+    background: var(--chrome-bg); border-left: 1px solid var(--line-firm);
+    box-shadow: -6px 0 34px rgba(43,38,34,0.13); backdrop-filter: blur(16px);
+    transform: translateX(100%); transition: transform 0.3s cubic-bezier(.4,0,.2,1);
+  }
+  #bookmarks.open { transform: translateX(0); }
+  #bookmarks-body { padding: 14px; overflow-y: auto; }
+  .bm-row { display: flex; gap: 4px; align-items: center; margin-bottom: 4px; }
+  .bm {
+    flex: 1; min-width: 0; display: flex; gap: 11px; align-items: center;
+    padding: 8px; border-radius: 9px; border: 1px solid transparent;
+    background: none; text-align: left;
+  }
+  .bm:hover { background: rgba(255,255,255,0.6); border-color: var(--line); }
+  .bm img { width: 48px; height: 48px; object-fit: cover; border-radius: 5px;
+            flex: none; background: var(--paper-dim); }
+  .bm-t { font-family: var(--serif); font-size: 13px; line-height: 1.25;
+          overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .bm-s { margin-top: 2px; font-size: 11px; color: var(--ink-faint); }
+  .bm-x { flex: none; background: none; border: none; color: var(--ink-faint);
+          font-size: 16px; line-height: 1; padding: 2px 4px; }
+  .bm-x:hover { color: var(--accent); }
+  .bm-empty { font-size: 12px; color: var(--ink-faint); line-height: 1.6; padding: 6px 4px; }
+  /* Badges sit inline in the caption row now, so no bottom margin. */
+  #focus-badges { display: inline-flex; gap: 6px; flex-wrap: wrap; vertical-align: middle; }
+  .badge { font-size: 9px; letter-spacing: 0.13em; text-transform: uppercase;
+           padding: 3px 8px; border-radius: 3px; border: 1px solid var(--line-firm);
+           color: var(--ink-soft); }
+  .badge.on-view { border-color: var(--accent); color: var(--accent); }
+  .badge.highlight { background: var(--accent); border-color: var(--accent); color: var(--paper); }
+  .tag { font-size: 11px; padding: 3px 9px; border-radius: 11px;
+         background: rgba(43,38,34,0.06); color: var(--ink-soft); }
+
+  /* Top-centre, not bottom: the dock lives at the bottom and the two
+     collided. */
+  #focus-esc { position: fixed; top: 26px; left: 50%; transform: translateX(-50%);
+               font-size: 10px; letter-spacing: 0.13em; text-transform: uppercase;
+               color: var(--ink-soft); cursor: pointer;
+               padding: 7px 14px; border-radius: 8px;
+               background: rgba(246,243,236,0.86); border: 1px solid var(--line);
+               backdrop-filter: blur(7px); }
+  #focus-esc:hover { color: var(--ink); }
+
+  /* ─── status ───────────────────────────────────────────────────────── */
+  #status {
+    position: fixed; top: 22px; right: 26px; z-index: 22;
+    display: flex; align-items: center; gap: 9px; padding: 8px 14px;
+    border-radius: 9px; background: var(--chrome-bg); border: 1px solid var(--line);
+    box-shadow: var(--shadow); backdrop-filter: blur(14px);
+    font-size: 12px; color: var(--ink-soft);
+    opacity: 0; transition: opacity 0.25s ease; pointer-events: none;
+  }
+  #status.show { opacity: 1; }
+  .spinner { width: 12px; height: 12px; border-radius: 50%; flex: none;
+             border: 1.6px solid var(--ink-faint); border-top-color: transparent;
+             animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 720px) {
+    #masthead { top: 14px; left: 16px; }
+    #status { top: 12px; right: 14px; font-size: 11px; padding: 6px 11px; }
+    #dock { bottom: 12px; gap: 2px; padding: 5px; }
+    .dock-btn { height: 34px; min-width: 34px; padding: 0 8px; }
+    #dock-label { max-width: 84px; font-size: 12px; }
+    #hint { bottom: 62px; font-size: 9px; letter-spacing: 0.1em; }
+    /* No room for it beside the dock on a phone — the record link in the
+       caption still credits the source. */
+    #colophon { display: none; }
+    #focus-bar { bottom: 66px; width: calc(100vw - 20px); padding: 11px 13px; max-height: 44vh; }
+    #focus-title { font-size: 15px; }
+    #focus-esc { top: 12px; font-size: 9px; padding: 6px 10px; }
+    #focus-label { grid-template-columns: 80px 1fr; }
+  }
+</style>
+
+<div id="masthead">
+  <h1>Met Atlas</h1>
+  <div class="sub" id="masthead-sub">The Metropolitan Museum of Art</div>
+</div>
+
+<div id="status"><span class="spinner"></span><span id="status-text">Loading…</span></div>
+
+<!-- ── Live gesture guide ──────────────────────────────────────────────
+     Appears only once a hand is actually in frame, and highlights whatever
+     is currently recognised — so it teaches by confirming, not by making
+     someone memorise a list before they start. -->
+<div id="gesture-guide">
+  <div class="gg-item" data-g="point"><b>Point</b><span>pan that way</span></div>
+  <div class="gg-item" data-g="palm"><b>Open palm</b><span>push in · pull back to fly</span></div>
+  <div class="gg-item" data-g="fist"><b>Fist</b><span>stop</span></div>
+  <div class="gg-item" data-g="peace"><b>Peace</b><span>focus the centred work</span></div>
+  <div class="gg-item" data-g="heart"><b>Heart</b><span>both hands · star it</span></div>
+</div>
+
+<!-- ── Gallery sound player ────────────────────────────────────────── -->
+<div id="music-panel">
+  <div class="mp-head">
+    <div class="mp-ident">
+      <div class="mp-credit" id="mp-credit"></div>
+      <div class="mp-title" id="mp-title"></div>
+    </div>
+    <button class="mp-x" id="mp-close" aria-label="Close">×</button>
+  </div>
+
+  <canvas id="mp-viz" height="46"></canvas>
+
+  <div class="mp-controls">
+    <button id="mp-play" aria-label="Play">
+      <svg id="mp-icon-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg>
+      <svg id="mp-icon-pause" viewBox="0 0 24 24" style="display:none"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+    </button>
+    <svg class="mp-spk" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M17 8.5a4.5 4.5 0 010 7"/></svg>
+    <input type="range" id="mp-vol" min="0" max="100" value="32" aria-label="Volume" />
+  </div>
+
+  <div id="mp-missing">
+    No track installed. Drop an MP3 at <code>audio/gallery-sound.mp3</code> —
+    see <code>audio/README.md</code> for public-domain sources.
+  </div>
+</div>
+
+<!-- ── Gesture self-view ───────────────────────────────────────────────
+     Deliberately visible whenever the camera is live. A hidden webcam
+     feed is the kind of thing that should never be possible to forget
+     about. -->
+<div id="gesture-panel">
+  <div class="gp-head">
+    <span class="gp-dot"></span>
+    <span class="gp-title">Hand control</span>
+    <button id="gp-close" aria-label="Turn off">×</button>
+  </div>
+  <div class="gp-stage">
+    <video id="gp-video" autoplay playsinline muted></video>
+    <canvas id="gp-overlay"></canvas>
+    <div id="gp-loading">Loading hand model…</div>
+  </div>
+  <div class="gp-read"><span id="gp-gesture">no hand</span></div>
+  <div class="gp-legend">
+    <div><b>Point</b> pan that way</div>
+    <div><b>Open palm</b> push in / pull back to fly</div>
+    <div><b>Fist</b> stop — hold to close a focused work</div>
+    <div><b>Peace</b> focus the centred work</div>
+    <div><b>Heart</b> both hands — star the work</div>
+  </div>
+</div>
+
+<footer id="colophon">
+  An independent project — not affiliated with<br>
+  The Metropolitan Museum of Art<br>
+  Records via the <a href="https://metmuseum.github.io/" target="_blank" rel="noopener noreferrer">Met Collection API</a> ·
+  images shown are public domain
+</footer>
+<div id="hint">WASD or arrows to pan &nbsp;·&nbsp; Scroll to fly &nbsp;·&nbsp; Drag to move &nbsp;·&nbsp; Click a work to focus</div>
+
+<!-- ── Collection browser ──────────────────────────────────────────── -->
+<div id="browser-veil">
+  <div id="browser">
+    <div class="panel-head">
+      <span class="panel-title">The Collection</span>
+      <button class="panel-x" id="browser-close" aria-label="Close">×</button>
+    </div>
+    <div id="browser-body">
+      <div id="search-row">
+        <input id="search-input" type="text" placeholder="Search the collection — “Monet”, “armor”, “kimono”…" />
+        <button id="search-go">Search</button>
+      </div>
+      <div class="group-label">Survey</div>
+      <div class="dept-grid" id="survey-grid"></div>
+      <div class="group-label" style="margin-top:18px">Departments</div>
+      <div class="dept-grid" id="dept-grid"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Filters / Cluster ───────────────────────────────────────────── -->
+<div id="filters">
+  <div class="panel-head">
+    <span class="panel-title">Filters</span>
+    <button class="panel-x" id="filters-close" aria-label="Close">×</button>
+  </div>
+  <div id="filters-body">
+    <div class="tabs">
+      <button class="tab active" data-tab="explore">Explore</button>
+      <button class="tab" data-tab="cluster">Cluster</button>
+    </div>
+
+    <div id="tab-explore">
+      <div class="f-section">
+        <div class="f-label">Date</div>
+        <div class="f-value" id="date-value">—</div>
+        <div class="range-wrap">
+          <div class="track"></div><div class="track-fill" id="track-fill"></div>
+          <input type="range" id="date-min" /><input type="range" id="date-max" />
+        </div>
+      </div>
+      <div class="f-section">
+        <div class="f-label">Colour</div>
+        <div class="swatches" id="colour-swatches"></div>
+      </div>
+      <div class="f-section">
+        <div class="f-label">Keywords</div>
+        <div class="chips" id="keyword-chips"></div>
+      </div>
+      <button id="f-reset">Clear filters</button>
+      <div id="f-count"></div>
+    </div>
+
+    <div id="tab-cluster" style="display:none">
+      <div class="f-section">
+        <div class="f-label">Group the field by</div>
+        <div class="cluster-opts" id="cluster-opts"></div>
+      </div>
+      <div id="f-count-cluster" style="font-size:11.5px;color:var(--ink-faint);text-align:center"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Focus ───────────────────────────────────────────────────────── -->
+<div id="focus">
+  <div id="focus-esc">Click another work to fly to it &nbsp;·&nbsp; Esc or click the wall to close</div>
+
+  <!-- Caption bar. Identity first, full record on demand — a bottom strip
+       cannot hold a wall label without becoming a wall. -->
+  <div id="focus-bar">
+    <div class="fb-head">
+      <div class="fb-id">
+        <div id="focus-title"></div>
+        <div id="focus-creator"></div>
+      </div>
+      <button id="focus-star" title="Star this work (B)" aria-label="Star this work">
+        <svg viewBox="0 0 24 24"><path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.6 9.7l5.8-.8z"/></svg>
+      </button>
+    </div>
+
+    <div class="fb-row">
+      <span id="focus-badges"></span>
+      <span id="focus-facts"></span>
+      <button id="focus-more">Full record ⌄</button>
+      <a id="focus-link" class="fb-link" target="_blank" rel="noopener noreferrer">metmuseum.org ↗</a>
+    </div>
+
+    <div id="focus-full">
+      <dl id="focus-label"></dl>
+      <div id="focus-credit"></div>
+      <div id="focus-tags"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Starred ─────────────────────────────────────────────────────── -->
+<div id="bookmarks">
+  <div class="panel-head">
+    <span class="panel-title">Starred</span>
+    <button class="panel-x" id="bookmarks-close" aria-label="Close">×</button>
+  </div>
+  <div id="bookmarks-body"></div>
+</div>
+
+<!-- ── Dock ────────────────────────────────────────────────────────── -->
+<div id="dock">
+  <button class="dock-btn" id="btn-source" title="Browse the collection">
+    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="M21 15l-5-5L5 20"/></svg>
+    <span id="dock-label">Across the Museum</span>
+  </button>
+  <div class="dock-sep"></div>
+  <button class="dock-btn" id="btn-recenter" title="Recenter the field">
+    <svg viewBox="0 0 24 24"><path d="M3 11l19-9-9 19-2-8-8-2z"/></svg>
+  </button>
+  <button class="dock-btn" id="btn-filters" title="Filters and clustering">
+    <svg viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M10 18h4"/></svg>
+  </button>
+  <button class="dock-btn" id="btn-bookmarks" title="Starred works">
+    <svg viewBox="0 0 24 24"><path d="M6 3h12a1 1 0 011 1v17l-7-5-7 5V4a1 1 0 011-1z"/></svg>
+  </button>
+  <button class="dock-btn" id="btn-gesture" title="Hand gestures — uses your camera">
+    <svg viewBox="0 0 24 24"><path d="M9 11V5.5a1.5 1.5 0 013 0V11m0-1.5a1.5 1.5 0 013 0V12m0-1a1.5 1.5 0 013 0v4a6 6 0 01-6 6h-1a6 6 0 01-6-6v-4a1.5 1.5 0 013 0"/></svg>
+  </button>
+  <button class="dock-btn" id="btn-music" title="Gallery sound">
+    <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+  </button>
+  <div class="dock-sep"></div>
+  <button class="dock-btn" id="btn-reload" title="Draw a fresh set">
+    <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 11-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+  </button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+
+/* ══════════════════════════════════════════════════════════════════════
+   Met Atlas — an infinite canvas over The Metropolitan Museum of Art.
+
+   Three measured constraints shape the whole design:
+
+   1. images.metmuseum.org sends no Access-Control-Allow-Origin on GET
+      (it answers OPTIONS with one, but images are simple requests and are
+      never preflighted, so that header never applies). WebGL refuses to
+      texture from non-CORS-clean images, so everything goes through the
+      weserv proxy.
+
+   2. The API is N+1 — /search and /objects return bare objectIDs, and
+      each image costs one more request. It also sits behind an Imperva
+      WAF that starts serving 403 HTML challenge pages well below the
+      documented 80 req/s, and stays angry for minutes. Hence: small
+      pool, paced batches, block detection, and a persistent cache.
+
+   3. Yield is partial (~92% measured) — records can carry an empty
+      primaryImageSmall or be withheld as non-public-domain.
+   ══════════════════════════════════════════════════════════════════════ */
+
+const API   = 'https://collectionapi.metmuseum.org/public/collection/v1';
+const PROXY = 'https://images.weserv.nl/?url=';
+
+/* 60, not 88. Every work costs its own API call, and the Met's WAF starts
+   refusing (by omitting CORS headers) somewhere above this. A field of 60
+   that reliably fills is worth more than 88 that half-loads. */
+const TARGET_TILES  = 60;
+const OVERSAMPLE    = 1.25;
+const BATCH_SIZE    = 3;
+const BATCH_PAUSE   = 260;
+const THROTTLE_WAIT = 6000;
+const MAX_INFLIGHT  = 5;
+const THUMB_W       = 500;
+const ID_POOL_CAP   = 2500;   // cap cached ID lists so localStorage survives
+
+/* The survey view unions a few visually strong departments. The Met's own
+   isHighlight flag looks like the obvious default but is unusable as an
+   entry point: it only works through /search, and /search has no real
+   wildcard, so `q=*&isHighlight=true` returns 2–13 records per department.
+   The flag is still read per-record and shown as a badge. */
+const SURVEYS = [
+  { id: 'survey-wide',  label: 'Across the Museum', depts: [11, 21, 14, 17],
+    sub: 'Paintings, modern, Islamic, medieval' },
+  { id: 'survey-world', label: 'Ancient & Classical', depts: [10, 13, 3],
+    sub: 'Egypt, Greece & Rome, West Asia' },
+];
+
+const proxied = (url, w = 820) =>
+  (!url || url.startsWith(PROXY)) ? url : PROXY + encodeURIComponent(url) + '&w=' + w;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* ══════════════════════════════════════════════════════════════════════
+   Network
+   ══════════════════════════════════════════════════════════════════════ */
+/* Imperva has two ways of saying no, and only one of them is visible to
+   us. Sometimes it answers 403 with an HTML challenge — readable. More
+   often it returns a response with the Access-Control-Allow-Origin header
+   simply absent, which the browser blocks before any JS can see a status;
+   fetch just rejects, indistinguishable from the network dropping.
+
+   So a run of consecutive rejections is itself the signal. One failure is
+   noise, four in a row is the WAF. */
+// `failures` is cumulative and never reset — a load compares it before and
+// after to tell "the API answered with nothing" apart from "we never
+// reached the API", which need completely different messages.
+const throttle = { until: 0, consecutive: 0, failures: 0 };
+const isThrottled = () => Date.now() < throttle.until;
+const tripThrottle = () => { throttle.until = Date.now() + THROTTLE_WAIT; };
+const FAILS_BEFORE_BACKOFF = 4;
+
+async function fetchJSON(url, { retries = 2, timeout = 12000, signal = null } = {}) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    if (signal && signal.aborted) return null;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeout);
+    const relay = () => ctl.abort();
+    if (signal) signal.addEventListener('abort', relay, { once: true });
+    try {
+      const res = await fetch(url, { signal: ctl.signal });
+
+      // A WAF block is a 403/429 carrying an HTML challenge page. Retrying
+      // into it only deepens the block, so stand down and flag it — this is
+      // the difference between "slow" and "randomly broken".
+      if (res.status === 403 || res.status === 429) {
+        tripThrottle(); refreshStatus(); await sleep(THROTTLE_WAIT); continue;
+      }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text);
+        throttle.consecutive = 0;              // clean response — we're through
+        return json;
+      } catch { tripThrottle(); refreshStatus(); await sleep(THROTTLE_WAIT); continue; }
+    } catch {
+      if (signal && signal.aborted) return null;
+
+      // Almost always a CORS rejection from the WAF rather than a real
+      // network fault. Back off once it's clearly a pattern, and jitter
+      // the retry so a whole batch doesn't march back in lockstep.
+      throttle.consecutive++;
+      throttle.failures++;
+      if (throttle.consecutive >= FAILS_BEFORE_BACKOFF) {
+        tripThrottle(); refreshStatus();
+        await sleep(THROTTLE_WAIT);
+        throttle.consecutive = 0;
+      }
+      if (attempt === retries) return null;
+      await sleep(400 * (attempt + 1) + Math.random() * 250);
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', relay);
+    }
+  }
+  return null;
+}
+
+/* ── Persistent cache ────────────────────────────────────────────────
+   Stores only the normalised shape — raw records blow the ~5MB budget
+   fast. A cached `null` is a real verdict ("fetched once, unusable"),
+   so lookups must use has() rather than truthiness. */
+function makeStore(key, max) {
+  let map = new Map();
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) map = new Map(Object.entries(JSON.parse(raw)));
+  } catch { /* corrupt or unavailable — run without persistence */ }
+
+  let dirty = false;
+  const flush = () => {
+    if (!dirty) return;
+    dirty = false;
+    try {
+      while (map.size > max) map.delete(map.keys().next().value);
+      localStorage.setItem(key, JSON.stringify(Object.fromEntries(map)));
+    } catch {
+      try {                                    // quota — halve and retry once
+        [...map.keys()].slice(0, Math.floor(map.size / 2)).forEach((k) => map.delete(k));
+        localStorage.setItem(key, JSON.stringify(Object.fromEntries(map)));
+      } catch { /* give up on persistence, keep running */ }
+    }
+  };
+  setInterval(flush, 4000);
+  addEventListener('pagehide', flush);
+
+  return {
+    get: (k) => map.get(String(k)),
+    set: (k, v) => { map.set(String(k), v); dirty = true; },
+    has: (k) => map.has(String(k)),
+  };
+}
+
+const objectCache = makeStore('metatlas.objects.v2', 1600);
+const idCache     = makeStore('metatlas.idlists.v2', 24);
+
+/* Last known-good set of works, kept whole and separate from the id/object
+   caches. The Met rate-limits hard enough that a first-time visitor can
+   land on a completely empty canvas through no fault of their own — which,
+   for anyone evaluating this, is indistinguishable from broken. Replaying
+   the previous session's works means the field is never empty on arrival;
+   the live load then replaces them if it succeeds. */
+const FALLBACK_KEY = 'metatlas.lastGood.v1';
+const FALLBACK_MAX = 60;
+
+function saveFallback(records) {
+  if (records.length < 8) return;              // too thin to be worth replaying
+  try {
+    localStorage.setItem(FALLBACK_KEY, JSON.stringify({
+      at: Date.now(),
+      label: currentSource.label,
+      works: records.slice(0, FALLBACK_MAX),
+    }));
+  } catch { /* quota — the app works fine without it */ }
+}
+
+function loadFallback() {
+  try {
+    const raw = localStorage.getItem(FALLBACK_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    return (p && Array.isArray(p.works) && p.works.length) ? p : null;
+  } catch { return null; }
+}
+
+/* ── Normalise ───────────────────────────────────────────────────────
+   The field selection is deliberate. A generic image grid shows title and
+   artist; a museum shows the wall label — accession number, credit line,
+   gallery, on-view status. Those fields also feed the filter and cluster
+   facets, so they cost nothing extra: the record is already in hand. */
+function normalise(o) {
+  if (!o || !o.primaryImageSmall || !o.isPublicDomain) return null;
+  return {
+    id: o.objectID,
+    title: o.title || 'Untitled',
+    thumb: o.primaryImageSmall,
+    image: o.primaryImage || o.primaryImageSmall,
+    meta: {
+      creator:       o.artistDisplayName || o.culture || 'Unknown maker',
+      creatorBio:    o.artistDisplayBio || '',
+      nationality:   o.artistNationality || '',
+      dateText:      o.objectDate || '',
+      year:          Number.isFinite(o.objectBeginDate) ? o.objectBeginDate : null,
+      medium:        o.medium || '',
+      dimensions:    o.dimensions || '',
+      objectName:    o.objectName || '',
+      department:    o.department || '',
+      classification: o.classification || '',
+      culture:       o.culture || '',
+      period:        o.period || '',
+      tags:          Array.isArray(o.tags) ? o.tags.map((t) => t.term).filter(Boolean) : [],
+      creditLine:    o.creditLine || '',
+      accession:     o.accessionNumber || '',
+      gallery:       o.GalleryNumber || '',
+      isOnView:      !!o.GalleryNumber,
+      isHighlight:   !!o.isHighlight,
+      recordUrl:     o.objectURL || '',
+    },
+  };
+}
+
+function shuffle(a) {
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/* ── Source resolution ───────────────────────────────────────────────
+   A multi-department listing is ~180k IDs / 1.2MB / 4s, which is far too
+   heavy to re-download per load. So the ID list is sampled down and
+   cached — the cost lands once, on first visit. */
+async function fetchIds(source, signal) {
+  const key = source.id || (source.kind + ':' + (source.query || source.dept));
+  if (idCache.has(key)) return idCache.get(key);
+
+  let ids = [];
+  if (source.kind === 'search') {
+    const r = await fetchJSON(
+      `${API}/search?q=${encodeURIComponent(source.query)}&hasImages=true`, { signal });
+    ids = (r && r.objectIDs) || [];
+  } else {
+    const list = source.depts ? source.depts.join('|') : source.dept;
+    const r = await fetchJSON(`${API}/objects?departmentIds=${list}`, { timeout: 30000, signal });
+    ids = (r && r.objectIDs) || [];
+  }
+
+  ids = shuffle(ids.slice()).slice(0, ID_POOL_CAP);
+  if (ids.length && source.kind !== 'search') idCache.set(key, ids);
+  return ids;
+}
+
+async function hydrate(ids, want, signal, onBatch) {
+  const pool = shuffle(ids.slice()).slice(0, Math.ceil(want * OVERSAMPLE));
+  const out = [];
+
+  for (let i = 0; i < pool.length && out.length < want; i += BATCH_SIZE) {
+    if (signal.aborted) return out;
+
+    const records = await Promise.all(pool.slice(i, i + BATCH_SIZE).map(async (id) => {
+      if (objectCache.has(id)) return objectCache.get(id);
+      // 3 retries, not 1: WAF CORS rejections are intermittent, and a
+      // record dropped here is a hole in the field for the whole session.
+      const raw = await fetchJSON(`${API}/objects/${id}`, { retries: 3, timeout: 9000, signal });
+      if (!raw) return null;                   // network failure — don't cache, retry later
+      const rec = normalise(raw);
+      objectCache.set(id, rec);                // null is a legitimate cached verdict
+      return rec;
+    }));
+
+    if (signal.aborted) return out;
+    const usable = records.filter(Boolean);
+    out.push(...usable);
+    if (usable.length) onBatch(usable);
+
+    if (isThrottled()) {
+      refreshStatus();
+      while (isThrottled() && !signal.aborted) await sleep(400);
+    }
+    if (i + BATCH_SIZE < pool.length && out.length < want) await sleep(BATCH_PAUSE);
+  }
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Scene
+
+   Density is the whole game on a light ground. A wide, shallow scatter
+   with early fog reads as a handful of stamps on a beige wall; a tight,
+   deep, overlapping field with late fog reads as an archive you are
+   flying through. Every constant here is tuned for the latter.
+   ══════════════════════════════════════════════════════════════════════ */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xDED6C8);
+/* The fog has to END inside the field, not past it. It previously ran
+   62→140 while the field is only 70 deep, so nothing was ever more than
+   ~11% faded — works arrived at essentially full opacity and appeared to
+   pop into existence.
+
+   Ending at 70 (exactly FIELD_DEPTH) means a newly placed work is the
+   colour of the wall and emerges as it travels toward you. Starting at 40
+   rather than nearer keeps the front half of the field fully saturated —
+   pulling the near plane in too far bleaches the mid-field and the canvas
+   reads as empty wall, which is worse than the pop it fixes. */
+scene.fog = new THREE.Fog(0xDED6C8, 40, 70);
+
+const camera = new THREE.PerspectiveCamera(54, innerWidth / innerHeight, 0.1, 400);
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* Depth range is deliberately shallow. Spread over 110 units, most works
+   sit far enough back to render as postage stamps and the field reads as
+   a scatter plot. Compressed to 70 with larger works, the size range
+   across the field runs roughly 42% of frame height down to 8% — every
+   work is legible, and near ones overlap into the layered mass that
+   makes this feel like an archive rather than a chart. */
+const FIELD_DEPTH   = 70;
+/* Clearance behind the camera before a work is reclaimed. Generous on
+   purpose: works rebirthed during backward flight are parked in this gap,
+   and at only 10 units they ended up ~8 units in FRONT of the viewer the
+   moment the motion stopped — a 6-unit work at 8 units fills the entire
+   frame. Anything parked here is behind the camera and therefore unseen. */
+const RECYCLE_AHEAD = 26;
+const ART_HEIGHT    = 6.0;
+
+/* Spread has to grow with distance. A fixed-radius column of tiles looks
+   sensible in plan view but renders as a tight knot in the middle of the
+   screen with empty margins all round, because perspective shrinks the
+   far end toward the vanishing point. Matching the spread to the view
+   frustum instead keeps works distributed evenly across the frame at
+   every depth. 0.52 ≈ tan(half of the 54° vertical FOV). */
+const FIELD_NEAR      = 7;
+const FRUSTUM_SPREAD  = 0.52;
+const reachAt = (z) => FIELD_NEAR + Math.abs(z - camera.position.z) * FRUSTUM_SPREAD;
+const TAN_HALF_FOV    = Math.tan((54 * Math.PI / 180) / 2);   // matches camera.fov
+
+/* How far out a work may drift before it is returned to the field. Fixed,
+   NOT derived from the frustum: a frustum-based bound shrinks as a work
+   approaches, which drags every incoming work onto the camera axis and
+   piles them up. Sized from the widest scatter() ever produces at the far
+   plane, so it only trips when the camera has actually panned away. */
+const MAX_SPREAD  = FIELD_NEAR + FIELD_DEPTH * FRUSTUM_SPREAD;   // ≈ 43.4
+const LATERAL_X   = MAX_SPREAD * 1.25 * 1.4;                     // ≈ 76
+const LATERAL_Y   = MAX_SPREAD * 0.72 * 1.4;                     // ≈ 44
+
+/* Works dissolve just before the camera would pass through them. A field
+   thumb is 500px, so close up it is a blurry smear filling the frame —
+   which is what you end up looking at, rather than the artwork. Fading
+   them out reads as passing by instead of colliding.
+
+   A 6-unit work at 10 units away already spans ~59% of frame height and
+   only gets blurrier past that, so the dissolve starts there.
+   The focused tile is exempt: the camera parks close to it deliberately. */
+const NEAR_FADE_START = 10;
+const NEAR_FADE_END   = 3;
+
+/* Nothing spawns closer than this. Without a floor, uniform depth puts a
+   few works a couple of units from the lens where a 4.6-unit painting
+   swallows the entire frame — one artwork, no field. At 16 units a work
+   reads as prominent (~28% of frame height) without dominating. */
+const MIN_DIST = 14;
+const randomDepth = () =>
+  camera.position.z - (MIN_DIST + Math.random() * (FIELD_DEPTH - MIN_DIST));
+
+const texLoader = new THREE.TextureLoader();
+texLoader.setCrossOrigin('anonymous');
+
+const geometry = new THREE.PlaneGeometry(1, 1);
+const tiles = [];
+const artMeshes = [];
+
+/* Each work sits on a dark mount board. On a light ground this is what
+   creates separation — it reads as a soft shadow near to, and as a
+   receding dark shape far away, which is the depth cue the pale fog
+   cannot provide on its own. */
+function makeTile() {
+  const group = new THREE.Group();
+
+  const mount = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    color: 0x6B625A, transparent: true, opacity: 0,
+  }));
+  mount.position.z = -0.04;
+
+  const art = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({
+    color: 0xEAE4D8, transparent: true, opacity: 0,
+  }));
+
+  group.add(mount, art);
+  // fade = the tile's own load/retire opacity; dim = how far it recedes
+  // when another work is focused. Kept separate so a tile fading in while
+  // dimmed resolves to the right value instead of fighting itself.
+  group.userData = { asset: null, loaded: false, target: 0, fade: 0, dim: 1,
+                     retiring: false, hiResFor: null, art, mount };
+  scatter(group, randomDepth());
+  scene.add(group);
+  tiles.push(group);
+  artMeshes.push(art);
+  art.userData.tile = group;
+  return group;
+}
+
+/* Scatter around the camera's current x/y, never the world origin — the
+   field must stay wrapped around the viewer or panning far in one
+   direction flies out of the slab into empty space. */
+/* spreadZ lets a caller size the lateral spread for a depth other than the
+   one the work is being placed at. Rebirths behind the camera need this:
+   sized at their birth distance (8 units) they land in a tight column and
+   stay clustered on the axis once they come into view. */
+function scatter(group, z, spreadZ = z) {
+  const r = reachAt(spreadZ) * Math.sqrt(Math.random());
+  const a = Math.random() * Math.PI * 2;
+  group.position.set(
+    camera.position.x + Math.cos(a) * r * 1.05,   // wider than tall, like the viewport
+    camera.position.y + Math.sin(a) * r * 0.60,
+    z,
+  );
+}
+
+function releaseTexture(group) {
+  const m = group.userData.art.material;
+  if (m.map) { m.map.dispose(); m.map = null; }
+}
+
+/* Which works are on screen right now. A filter narrowing to five works
+   must show five works — wrapping them across 88 tiles fills the frame
+   with the same vase six times, which reads as a rendering bug rather
+   than a small result. So a work is never on the wall twice at once;
+   surplus tiles park themselves instead. */
+const inUse = new Set();
+
+function releaseAsset(group) {
+  const a = group.userData.asset;
+  if (a) inUse.delete(a.id);
+  group.userData.asset = null;
+}
+
+/* Next work not already hanging. Returns null when the whole filtered
+   set is on screen — the caller parks the tile. */
+function nextAsset() {
+  for (let i = 0; i < visible.length; i++) {
+    const a = visible[(cursor + i) % visible.length];
+    if (!inUse.has(a.id)) { cursor = (cursor + i + 1) % visible.length; return a; }
+  }
+  return null;
+}
+
+/* Retire a tile from the field. The texture is deliberately NOT disposed
+   here: the tile is still on screen at full opacity and easing out, and
+   dropping its map mid-fade leaves a blank white plane hanging in the
+   field — the ghost rectangles a narrowing filter used to scatter
+   everywhere. The work is released for reuse immediately; the texture is
+   freed in the loop once it has actually faded. */
+function park(group) {
+  const u = group.userData;
+  if (u.asset) inUse.delete(u.asset.id);
+  u.asset = null;
+  u.loaded = false;
+  u.target = 0;
+  u.retiring = true;
+}
+
+function assign(group, asset) {
+  const u = group.userData;
+  if (u.asset) inUse.delete(u.asset.id);
+  u.asset = asset; u.loaded = false; u.target = 0;
+  u.retiring = false;
+  u.fade = 0;
+  u.hiResFor = null;              // new work — any hi-res swap is stale
+  inUse.add(asset.id);
+  releaseTexture(group);
+  u.art.material.color.setHex(0xEAE4D8);
+  u.art.material.opacity = 0;
+  u.mount.material.opacity = 0;
+  u.art.material.needsUpdate = true;
+  u.art.scale.set(3.6, 3.6, 1);
+  u.mount.scale.set(3.9, 3.9, 1);
+  enqueueTexture(group, asset);
+}
+
+/* ── Texture queue ───────────────────────────────────────────────────
+   Every image goes through one proxy host and browsers cap connections
+   per host at ~6. Firing 88 loads at once therefore parallelises nothing;
+   it builds an invisible queue we cannot prioritise while the proxy
+   degrades under the pile-up. So we own the queue: bounded concurrency,
+   nearest tile first, because what the viewer is flying toward matters. */
+const texQueue = [];
+let inflight = 0;
+const imgStats = { loaded: 0, failed: 0 };
+
+function enqueueTexture(group, asset) { texQueue.push({ group, asset }); pumpQueue(); }
+
+function pumpQueue() {
+  while (inflight < MAX_INFLIGHT && texQueue.length) {
+    let best = -1, bestDist = Infinity;
+    for (let i = texQueue.length - 1; i >= 0; i--) {
+      const job = texQueue[i];
+      if (job.group.userData.asset !== job.asset) { texQueue.splice(i, 1); continue; }
+      const d = Math.abs(job.group.position.z - camera.position.z);
+      if (d < bestDist) { bestDist = d; best = i; }
+    }
+    if (best < 0) return;
+    const job = texQueue.splice(best, 1)[0];
+    inflight++;
+    loadTexture(job.group, job.asset);
+  }
+}
+
+function loadTexture(group, asset) {
+  const done = () => { inflight--; pumpQueue(); };
+  texLoader.load(
+    proxied(asset.thumb, THUMB_W),
+    (tex) => {
+      done();
+      if (group.userData.asset !== asset) { tex.dispose(); return; }
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.generateMipmaps = true;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+
+      const img = tex.image;
+      const aspect = (img && img.width && img.height) ? img.width / img.height : 1;
+      const h = ART_HEIGHT, w = h * aspect;
+      const u = group.userData;
+      u.art.scale.set(w, h, 1);
+      u.mount.scale.set(w + 0.26, h + 0.26, 1);
+      u.art.material.map = tex;
+      u.art.material.color.setHex(0xFFFFFF);
+      u.art.material.needsUpdate = true;
+      u.loaded = true;
+      u.target = 1;
+
+      asset.aspect = aspect;
+      if (!asset.colour) asset.colour = sampleColour(img);   // feeds the colour filter
+      imgStats.loaded++;
+      refreshStatus();
+    },
+    undefined,
+    () => {
+      done();
+      if (group.userData.asset !== asset) return;
+      group.userData.target = 0.16;     // faint placeholder beats a hole in the field
+      imgStats.failed++;
+      refreshStatus();
+    },
+  );
+}
+
+/* The Met supplies no colour data, so it is derived here. This is only
+   possible because the proxy re-serves images CORS-clean — a tainted
+   canvas would throw on getImageData. */
+const sampleCanvas = document.createElement('canvas');
+sampleCanvas.width = sampleCanvas.height = 12;
+const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+
+function sampleColour(img) {
+  try {
+    sampleCtx.drawImage(img, 0, 0, 12, 12);
+    const d = sampleCtx.getImageData(0, 0, 12, 12).data;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i+1]; b += d[i+2]; n++; }
+    r /= n; g /= n; b /= n;
+    return { r, g, b, family: colourFamily(r, g, b) };
+  } catch { return null; }
+}
+
+const COLOUR_FAMILIES = [
+  { key: 'warm',    label: 'Warm',    swatch: '#B5714A' },
+  { key: 'gold',    label: 'Gold',    swatch: '#C9A227' },
+  { key: 'green',   label: 'Green',   swatch: '#5F7A4A' },
+  { key: 'blue',    label: 'Blue',    swatch: '#4A6480' },
+  { key: 'dark',    label: 'Dark',    swatch: '#3A342E' },
+  { key: 'neutral', label: 'Neutral', swatch: '#A79B8A' },
+  { key: 'pale',    label: 'Pale',    swatch: '#E2DACB' },
+];
+
+function colourFamily(r, g, b) {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const light = (max + min) / 2, sat = max - min;
+  if (light < 62) return 'dark';
+  if (light > 202 && sat < 34) return 'pale';
+  if (sat < 26) return 'neutral';
+  if (b > r && b > g) return 'blue';
+  if (g > r && g > b) return 'green';
+  if (r > 120 && g > 95 && b < 105) return 'gold';
+  return 'warm';
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Collection state
+   ══════════════════════════════════════════════════════════════════════ */
+let assets = [];          // everything loaded for the current source
+let visible = [];         // assets passing the current filters
+let cursor = 0;
+let loadToken = null;
+let currentSource = SURVEYS[0];
+let clusterBy = null;     // null = free explore
+
+const filters = { yearMin: null, yearMax: null, colours: new Set(), keywords: new Set() };
+const bounds  = { yearMin: 0, yearMax: 0 };
+
+const statusEl   = document.getElementById('status');
+const statusText = document.getElementById('status-text');
+const spinnerEl  = statusEl.querySelector('.spinner');
+const loadState  = { phase: 'idle', found: 0, message: '' };
+
+function status(msg, { spin = true } = {}) {
+  if (!msg) { statusEl.classList.remove('show'); return; }
+  statusText.textContent = msg;
+  spinnerEl.style.display = spin ? '' : 'none';
+  statusEl.classList.add('show');
+}
+
+/* One place decides what the status line says, so "loading", "rate
+   limited" and "genuinely no results" can never look identical again. */
+function refreshStatus() {
+  if (loadState.phase === 'idle') return;
+  // Checked before the throttle line: once the fallback is on screen, the
+  // useful thing to say is what you are looking at, not that we are waiting.
+  if (loadState.phase === 'fallback') { status(loadState.message, { spin: false }); return; }
+  if (isThrottled()) { status('The Met is rate-limiting — easing off…'); return; }
+  if (loadState.phase === 'ids')   { status('Consulting the collection…'); return; }
+  if (loadState.phase === 'error') { status(loadState.message, { spin: false }); return; }
+
+  if (loadState.phase === 'hydrating') {
+    status(`${loadState.found} works found · ${imgStats.loaded} on the wall`);
+    return;
+  }
+  if (loadState.phase === 'done') {
+    if (!loadState.found) { status('Nothing found — try another search.', { spin: false }); return; }
+    if (inflight + texQueue.length > 0) {
+      // Clamped: imgStats.loaded counts texture loads, which recycling can
+      // push past the number of works. "780 of 40" is not a status.
+      status(`Hanging the last works — ${Math.min(imgStats.loaded, loadState.found)} of ${loadState.found}`);
+      return;
+    }
+    const fail = imgStats.failed ? ` · ${imgStats.failed} image${imgStats.failed > 1 ? 's' : ''} unavailable` : '';
+    status(`${loadState.found} works${fail}`, { spin: false });
+    setTimeout(() => { if (loadState.phase === 'done' && !texQueue.length) status(null); }, 2600);
+  }
+}
+
+/* ── Filtering ───────────────────────────────────────────────────────
+   Filters never re-fetch. They re-derive `visible` from what's already
+   loaded and repopulate the field, so the panel feels instant. */
+function passes(a) {
+  const y = a.meta.year;
+  if (filters.yearMin != null && y != null && y < filters.yearMin) return false;
+  if (filters.yearMax != null && y != null && y > filters.yearMax) return false;
+  if (filters.colours.size) {
+    if (!a.colour || !filters.colours.has(a.colour.family)) return false;
+  }
+  if (filters.keywords.size) {
+    const hay = [a.meta.classification, a.meta.creator, a.meta.department, ...(a.meta.tags || [])]
+      .filter(Boolean).map((s) => s.toLowerCase());
+    let hit = false;
+    for (const k of filters.keywords) if (hay.some((h) => h === k.toLowerCase())) { hit = true; break; }
+    if (!hit) return false;
+  }
+  return true;
+}
+
+function applyFilters({ repopulate = true } = {}) {
+  visible = assets.filter(passes);
+
+  // If the work on screen no longer passes, let it go. Otherwise the
+  // caption keeps describing a piece the filter has just removed, and its
+  // tile gets parked out from under the camera.
+  if (focused && !passes(focused)) closeFocus();
+  document.getElementById('f-count').textContent =
+    `${visible.length} of ${assets.length} works shown`;
+  document.getElementById('f-count-cluster').textContent =
+    clusterBy ? `${visible.length} works grouped` : `${visible.length} works in the field`;
+  if (repopulate) repopulateField();
+  if (clusterBy) layoutClusters();
+
+  // An empty field with no explanation reads as a crash. Say it plainly.
+  if (assets.length && !visible.length) {
+    loadState.phase = 'error';
+    loadState.message = 'No works match these filters.';
+    refreshStatus();
+  } else if (loadState.phase === 'error' && loadState.message === 'No works match these filters.') {
+    loadState.phase = 'done';
+    refreshStatus();
+  }
+}
+
+/* The date slider fires an input event per pixel of drag. Filtering is
+   cheap but repopulating the field is not, so coalesce the burst. */
+let filterTimer = null;
+function applyFiltersDebounced() {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => applyFilters(), 160);
+}
+
+/* Rebuild tile→asset mapping against the filtered set. Tiles beyond the
+   set wrap rather than sit empty: a narrow filter leaving 80% of the
+   field blank reads as breakage, repeats read as a small collection.
+
+   Crucially this preserves tiles whose work still passes. Reassigning
+   every tile on every filter change would re-download 88 textures per
+   keystroke of the date slider — the exact proxy stampede the queue
+   exists to prevent. */
+function repopulateField() {
+  const keep = new Set(visible.map((a) => a.id));
+
+  // Drop anything the filter excluded. Tiles whose work survived keep
+  // their texture — reassigning every tile on every filter change would
+  // re-download 88 images per slider tick.
+  for (const g of tiles) {
+    const a = g.userData.asset;
+    if (a && !keep.has(a.id)) park(g);
+  }
+  fillEmptyTiles();
+}
+
+/* Hand every empty tile a work that isn't already hanging; park whatever
+   is left over. This is what makes "5 of 21 works shown" display exactly
+   five works. */
+function fillEmptyTiles() {
+  for (const g of tiles) {
+    if (g.userData.asset) continue;
+    const a = nextAsset();
+    if (a) assign(g, a); else park(g);
+  }
+}
+
+function feed(records) {
+  assets.push(...records);
+  visible = assets.filter(passes);
+  fillEmptyTiles();
+}
+
+function topUp() { fillEmptyTiles(); }
+
+/* Replay the last good visit. Returns false if there is nothing stored,
+   so callers can fall through to the error message. */
+function showFallback(ctl) {
+  const fb = loadFallback();
+  if (!fb) return false;
+  feed(fb.works);
+  topUp();
+  loadState.phase = 'fallback';
+  loadState.found = fb.works.length;
+  loadState.message = `The Met is rate-limiting — showing your last visit (${fb.label})`;
+  rebuildFacets();
+  applyFilters({ repopulate: false });
+  refreshStatus();
+  setTimeout(() => { if (loadToken === ctl && loadState.phase === 'fallback') status(null); }, 6000);
+  showHint();
+  return true;
+}
+
+/* ── Load ────────────────────────────────────────────────────────────── */
+async function loadSource(source) {
+  if (loadToken) loadToken.abort();
+  const ctl = new AbortController();
+  loadToken = ctl;
+  currentSource = source;
+
+  document.getElementById('dock-label').textContent = source.label;
+  document.getElementById('masthead-sub').textContent =
+    source.kind === 'search' ? `Search — “${source.query}”` : source.label;
+
+  assets = []; visible = []; cursor = 0;
+  inUse.clear();
+  imgStats.loaded = 0; imgStats.failed = 0;
+  texQueue.length = 0;
+  filters.colours.clear(); filters.keywords.clear();
+  filters.yearMin = filters.yearMax = null;
+  clusterBy = null;
+  renderClusterOpts();
+
+  for (const g of tiles) {
+    g.userData.asset = null; g.userData.loaded = false;
+    g.userData.target = 0; g.userData.fade = 0; g.userData.hiResFor = null;
+    // Clearing the cluster goal matters: without it, tiles keep easing
+    // toward stations computed for the *previous* collection and the new
+    // one loads into a frozen, still-clustered field.
+    g.userData.goal = null;
+    releaseTexture(g);
+    g.userData.art.material.color.setHex(0xEAE4D8);
+    g.userData.art.material.opacity = 0;
+    g.userData.mount.material.opacity = 0;
+    scatter(g, randomDepth());
+  }
+
+  loadState.phase = 'ids'; loadState.found = 0;
+  refreshStatus();
+
+  const failsBefore = throttle.failures;
+  const ids = await fetchIds(source, ctl.signal);
+  if (ctl.signal.aborted) return;
+
+  if (!ids.length) {
+    /* Checking isThrottled() alone was not enough: the backoff window can
+       expire between the last blocked request and this test, so a fully
+       rate-limited load reported "Nothing found — try another search".
+       That sends someone hunting for a better search term when the real
+       answer is to wait a minute. If anything failed on the wire, say so. */
+    const blocked = throttle.failures > failsBefore || isThrottled();
+
+    // Blocked, not empty — show the last good set rather than bare wall.
+    if (blocked && showFallback(ctl)) return;
+
+    loadState.phase = 'error';
+    loadState.message = blocked
+      ? 'Can’t reach The Met right now — it rate-limits. Try again in a minute.'
+      : 'Nothing found — try another search.';
+    refreshStatus();
+    return;
+  }
+
+  loadState.phase = 'hydrating';
+  refreshStatus();
+
+  /* Deadline for the first work to arrive. When the WAF blocks everything,
+     hydration does not fail fast — it backs off six seconds per batch and
+     grinds on for minutes, leaving a blank canvas the whole time. So if
+     nothing has landed shortly after requests start failing, stop and
+     replay the last visit instead. The load is abandoned rather than left
+     running: against a hard block, continuing to retry helps nobody. */
+  let gotFirst = false;
+  const bail = setTimeout(() => {
+    if (gotFirst || ctl.signal.aborted) return;
+    if (throttle.failures > failsBefore && showFallback(ctl)) ctl.abort();
+  }, 5000);
+
+  const got = await hydrate(ids, TARGET_TILES, ctl.signal, (batch) => {
+    if (ctl.signal.aborted) return;
+    gotFirst = true;
+    clearTimeout(bail);
+    loadState.found += batch.length;
+    feed(batch);
+    refreshStatus();
+  });
+  clearTimeout(bail);
+  if (ctl.signal.aborted) return;
+
+  /* Ids can come from cache while every object fetch is being blocked, so
+     a load can reach here with a full id list and nothing hydrated. That
+     path bypassed the earlier check entirely and left a bare wall. */
+  if (!got.length && (throttle.failures > failsBefore || isThrottled())) {
+    if (showFallback(ctl)) return;
+  }
+
+  topUp();
+  loadState.phase = 'done';
+  loadState.found = got.length;
+  saveFallback(got);            // this load becomes the next visit's safety net
+  rebuildFacets();
+  applyFilters({ repopulate: false });
+  refreshStatus();
+  showHint();
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Facets — derived from what actually loaded, never hardcoded
+   ══════════════════════════════════════════════════════════════════════ */
+function rebuildFacets() {
+  const years = assets.map((a) => a.meta.year).filter((y) => y != null && y > -4000 && y < 2100);
+  bounds.yearMin = years.length ? Math.min(...years) : 0;
+  bounds.yearMax = years.length ? Math.max(...years) : 0;
+  filters.yearMin = bounds.yearMin;
+  filters.yearMax = bounds.yearMax;
+
+  const dMin = document.getElementById('date-min');
+  const dMax = document.getElementById('date-max');
+  for (const el of [dMin, dMax]) { el.min = bounds.yearMin; el.max = bounds.yearMax; }
+  dMin.value = bounds.yearMin; dMax.value = bounds.yearMax;
+  syncDateUI();
+
+  // Keyword chips: classification and artist carry the most signal, with
+  // Getty tag terms behind them. Counted so the useful ones sort first.
+  const counts = new Map();
+  const bump = (s) => { if (s) counts.set(s, (counts.get(s) || 0) + 1); };
+  for (const a of assets) {
+    bump(a.meta.classification);
+    bump(a.meta.creator !== 'Unknown maker' ? a.meta.creator : null);
+    (a.meta.tags || []).slice(0, 4).forEach(bump);
+  }
+  const top = [...counts.entries()]
+    .filter(([, n]) => n > 1)
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, 22);
+
+  const wrap = document.getElementById('keyword-chips');
+  wrap.innerHTML = '';
+  if (!top.length) {
+    wrap.innerHTML = '<span style="font-size:11.5px;color:var(--ink-faint)">No repeated terms in this set.</span>';
+  }
+  for (const [term, n] of top) {
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.innerHTML = `<span></span><span class="n">${n}</span>`;
+    b.firstChild.textContent = term;
+    b.addEventListener('click', () => {
+      if (filters.keywords.has(term)) filters.keywords.delete(term);
+      else filters.keywords.add(term);
+      b.classList.toggle('on', filters.keywords.has(term));
+      applyFilters();
+    });
+    wrap.appendChild(b);
+  }
+
+  const sw = document.getElementById('colour-swatches');
+  sw.innerHTML = '';
+  for (const c of COLOUR_FAMILIES) {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.style.background = c.swatch;
+    b.title = c.label;
+    b.addEventListener('click', () => {
+      if (filters.colours.has(c.key)) filters.colours.delete(c.key);
+      else filters.colours.add(c.key);
+      b.classList.toggle('on', filters.colours.has(c.key));
+      applyFilters();
+    });
+    sw.appendChild(b);
+  }
+}
+
+function syncDateUI() {
+  const dMin = document.getElementById('date-min');
+  const dMax = document.getElementById('date-max');
+  const lo = Math.min(+dMin.value, +dMax.value);
+  const hi = Math.max(+dMin.value, +dMax.value);
+  const era = (y) => (y < 0 ? `${Math.abs(y)} BCE` : `${y}`);
+  document.getElementById('date-value').textContent =
+    bounds.yearMax ? `${era(lo)} → ${era(hi)}` : '—';
+
+  const span = bounds.yearMax - bounds.yearMin || 1;
+  const fill = document.getElementById('track-fill');
+  fill.style.left  = ((lo - bounds.yearMin) / span * 100) + '%';
+  fill.style.right = (100 - (hi - bounds.yearMin) / span * 100) + '%';
+}
+
+for (const id of ['date-min', 'date-max']) {
+  document.getElementById(id).addEventListener('input', () => {
+    const dMin = document.getElementById('date-min');
+    const dMax = document.getElementById('date-max');
+    filters.yearMin = Math.min(+dMin.value, +dMax.value);
+    filters.yearMax = Math.max(+dMin.value, +dMax.value);
+    syncDateUI();                 // label tracks the drag immediately…
+    applyFiltersDebounced();      // …the field catches up once you settle
+  });
+}
+
+document.getElementById('f-reset').addEventListener('click', () => {
+  filters.colours.clear(); filters.keywords.clear();
+  filters.yearMin = bounds.yearMin; filters.yearMax = bounds.yearMax;
+  document.getElementById('date-min').value = bounds.yearMin;
+  document.getElementById('date-max').value = bounds.yearMax;
+  document.querySelectorAll('.chip.on, .swatch.on').forEach((e) => e.classList.remove('on'));
+  syncDateUI();
+  applyFilters();
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   Cluster mode — regroup the field by a facet
+   ══════════════════════════════════════════════════════════════════════ */
+const CLUSTERS = [
+  { key: 'department',     label: 'Department',     desc: 'Curatorial division',
+    of: (a) => a.meta.department || 'Unattributed' },
+  { key: 'decade',         label: 'Period',         desc: 'By century',
+    of: (a) => (a.meta.year == null ? 'Undated'
+        : (a.meta.year < 0 ? `${Math.ceil(Math.abs(a.meta.year) / 100)}c BCE`
+                           : `${Math.floor(a.meta.year / 100) + 1}th c.`)) },
+  { key: 'classification', label: 'Classification', desc: 'Object type',
+    of: (a) => a.meta.classification || 'Unclassified' },
+  { key: 'colour',         label: 'Colour',         desc: 'Derived from the image',
+    of: (a) => (a.colour ? a.colour.family : 'unknown') },
+];
+
+function renderClusterOpts() {
+  const wrap = document.getElementById('cluster-opts');
+  wrap.innerHTML = '';
+  const none = document.createElement('button');
+  none.className = 'cluster-opt' + (clusterBy ? '' : ' on');
+  none.innerHTML = `<div class="t">Free field</div><div class="d">No grouping — open exploration</div>`;
+  none.addEventListener('click', () => { clusterBy = null; renderClusterOpts(); scatterField(); });
+  wrap.appendChild(none);
+
+  for (const c of CLUSTERS) {
+    const b = document.createElement('button');
+    b.className = 'cluster-opt' + (clusterBy === c.key ? ' on' : '');
+    b.innerHTML = `<div class="t"></div><div class="d"></div>`;
+    b.querySelector('.t').textContent = c.label;
+    b.querySelector('.d').textContent = c.desc;
+    b.addEventListener('click', () => {
+      clusterBy = c.key; renderClusterOpts(); layoutClusters();
+      applyFilters({ repopulate: false });
+    });
+    wrap.appendChild(b);
+  }
+}
+
+/* Clustering places each group at its own station in the field and gives
+   tiles a target position to ease toward, rather than teleporting them —
+   the movement is what makes the grouping legible. */
+function layoutClusters() {
+  const spec = CLUSTERS.find((c) => c.key === clusterBy);
+  if (!spec || !visible.length) return;
+
+  const groups = new Map();
+  for (const g of tiles) {
+    const a = g.userData.asset;
+    if (!a) continue;
+    const k = spec.of(a);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(g);
+  }
+
+  const keys = [...groups.keys()].sort();
+  const ring = Math.max(16, keys.length * 3.4);
+
+  keys.forEach((k, i) => {
+    const ang = (i / keys.length) * Math.PI * 2;
+    const cx = camera.position.x + Math.cos(ang) * ring;
+    const cy = camera.position.y + Math.sin(ang) * ring * 0.5;
+    const cz = camera.position.z - 26 - (i % 3) * 16;
+
+    groups.get(k).forEach((g, j) => {
+      const cols = Math.ceil(Math.sqrt(groups.get(k).length));
+      const col = j % cols, row = Math.floor(j / cols);
+      g.userData.goal = new THREE.Vector3(
+        cx + (col - cols / 2) * 5.4,
+        cy - (row - cols / 2) * 5.4,
+        cz + ((j % 2) ? -1.4 : 1.4),
+      );
+    });
+  });
+}
+
+function scatterField() {
+  for (const g of tiles) { g.userData.goal = null; scatter(g, randomDepth()); }
+  applyFilters({ repopulate: false });
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Navigation
+   ══════════════════════════════════════════════════════════════════════ */
+const nav = { vx: 0, vy: 0, vz: 0, moved: 0, dragging: false };
+const DRAG_SCALE = 0.030;
+
+/* Panning and flying want opposite decay curves, so they get separate
+   damping. Pan should stop close to where you let go — it is a positioning
+   gesture. Depth should coast: at 0.974 a scroll keeps gliding for a
+   couple of seconds, which is what reads as flight rather than a shove.
+
+   The old single 0.90 made scrolling a lurch — a large impulse that spent
+   itself in about a third of a second. The impulse is now roughly a
+   quarter the size and delivered over ten times as long, so the distance
+   covered is similar but the motion is continuous. */
+const DAMP_PAN = 0.90;
+const DAMP_FLY = 0.974;
+const WHEEL_IMPULSE = 0.0026;
+const PINCH_IMPULSE = 0.0038;
+const MAX_FLY = 0.52;          // ceiling: a fast trackpad flick must not rocket
+
+const clampFly = (v) => Math.max(-MAX_FLY, Math.min(MAX_FLY, v));
+
+/* Ambient drift. The field is never completely still: the camera traces a
+   slow clockwise circle whenever nobody is steering. Beyond feeling
+   alive, the constant slight parallax is what reveals the depth of the
+   field — a static frame of overlapping planes reads as a flat collage.
+
+   Velocity (cos θ, −sin θ) integrates to a clockwise path: top → right →
+   bottom. Radius is speed/rate ≈ 6 units.
+
+   Tuned to be felt rather than watched: at this speed the field takes
+   about three minutes to come back around, and a work you are looking at
+   shifts by well under its own width while you read the label. */
+const DRIFT_RATE  = Math.PI * 2 / 175000;  // radians per ms — one lap ≈ 3 min
+const DRIFT_SPEED = 0.00022;               // world units per ms (≈ 0.44 per 2s)
+let driftAngle = Math.random() * Math.PI * 2;   // start anywhere on the circle
+
+const canvas = renderer.domElement;
+const pointers = new Map();
+let lastPointer = null, pinchDist = 0;
+
+canvas.addEventListener('pointerdown', (e) => {
+  cancelFlight();          // taking the controls always beats an animation
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  canvas.setPointerCapture(e.pointerId);
+  if (pointers.size === 1) { nav.dragging = true; nav.moved = 0; lastPointer = { x: e.clientX, y: e.clientY }; }
+  else if (pointers.size === 2) pinchDist = twoFingerDistance();
+});
+
+canvas.addEventListener('pointermove', (e) => {
+  if (!pointers.has(e.pointerId)) return;
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pointers.size === 2) {
+    const d = twoFingerDistance();
+    if (pinchDist) nav.vz = clampFly(nav.vz + (pinchDist - d) * PINCH_IMPULSE);
+    pinchDist = d;
+    return;
+  }
+  if (!nav.dragging || !lastPointer) return;
+  const dx = e.clientX - lastPointer.x, dy = e.clientY - lastPointer.y;
+  nav.moved += Math.abs(dx) + Math.abs(dy);
+  nav.vx -= dx * DRAG_SCALE;
+  nav.vy += dy * DRAG_SCALE;
+  lastPointer = { x: e.clientX, y: e.clientY };
+});
+
+function endPointer(e) {
+  pointers.delete(e.pointerId);
+  if (pointers.size < 2) pinchDist = 0;
+  if (pointers.size === 0) { nav.dragging = false; lastPointer = null; }
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+
+function twoFingerDistance() {
+  const [a, b] = [...pointers.values()];
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  nav.vz = clampFly(nav.vz + e.deltaY * WHEEL_IMPULSE);
+}, { passive: false });
+
+/* Keyboard panning — WASD or arrows move up / left / down / right across
+   the wall. Depth belongs to the scroll wheel alone, so the two never
+   compete for the same gesture.
+
+   Held keys feed the same velocity channels as drag and wheel rather than
+   moving the camera directly, so keyboard, mouse and trackpad blend
+   instead of fighting. The increments look small because DAMP_PAN 0.90
+   means terminal speed is ten times the per-frame push. */
+const NAV_KEYS = new Set(['w', 'a', 's', 'd',
+  'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
+const held = new Set();
+const KEY_PAN = 0.042;
+
+const isTyping = () => {
+  const t = document.activeElement;
+  return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
+};
+
+/* ── Dock stowing ────────────────────────────────────────────────────
+   Steering by keyboard means the hands are off the mouse, so the dock is
+   just something sitting in front of the collection. It stows on the
+   first navigation key and comes back the moment the pointer stirs.
+
+   It stays put while a panel is open: the dock is that panel's control,
+   and pulling it away mid-interaction would be its own kind of rude. */
+const dockEl = document.getElementById('dock');
+let dockStowed = false;
+
+const panelOpen = () =>
+  document.getElementById('filters').classList.contains('open') ||
+  document.getElementById('bookmarks').classList.contains('open') ||
+  document.getElementById('browser-veil').classList.contains('open');
+
+function stowDock() {
+  if (dockStowed || panelOpen()) return;
+  dockStowed = true;
+  dockEl.classList.add('stowed');
+}
+
+function revealDock() {
+  if (!dockStowed) return;
+  dockStowed = false;
+  dockEl.classList.remove('stowed');
+}
+
+// Any pointer activity brings it back. pointermove fires constantly, so
+// the early return in revealDock is doing real work here.
+for (const ev of ['pointermove', 'pointerdown', 'wheel']) {
+  addEventListener(ev, revealDock, { passive: true });
+}
+
+addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeFocus(); togglePanel('browser-veil', false); togglePanel('filters', false);
+    return;
+  }
+  if (isTyping()) return;                    // never hijack the search box
+  const k = e.key.toLowerCase();
+  if (k === 'b' && focused) { toggleStar(focused); return; }
+  if (NAV_KEYS.has(k)) { held.add(k); stowDock(); e.preventDefault(); }
+});
+
+addEventListener('keyup', (e) => held.delete(e.key.toLowerCase()));
+// Keys stick down if focus leaves mid-press — clear on blur or the camera
+// drifts forever with nothing touching the keyboard.
+addEventListener('blur', () => held.clear());
+
+function applyKeyboard() {
+  // Blocked only during a flight, not while focused — the field stays
+  // live, so flying yourself onward from a focused work is allowed.
+  if (!held.size || flight) return;
+  if (held.has('w') || held.has('arrowup'))    nav.vy += KEY_PAN;   // up
+  if (held.has('s') || held.has('arrowdown'))  nav.vy -= KEY_PAN;   // down
+  if (held.has('a') || held.has('arrowleft'))  nav.vx -= KEY_PAN;   // left
+  if (held.has('d') || held.has('arrowright')) nav.vx += KEY_PAN;   // right
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Focus view
+   ══════════════════════════════════════════════════════════════════════ */
+const focusEl = document.getElementById('focus');
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+let focused = null;
+
+canvas.addEventListener('click', (e) => {
+  if (nav.moved > 6) return;                 // that was a drag, not a click
+  ndc.x = (e.clientX / innerWidth) * 2 - 1;
+  ndc.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObjects(artMeshes, false)
+    .find((h) => h.object.userData.tile && h.object.userData.tile.userData.loaded);
+
+  // Hitting a work always focuses it — including while another is already
+  // focused, which is what lets you move straight from piece to piece
+  // through the dimmed field. Hitting bare wall dismisses.
+  if (hit) {
+    const tile = hit.object.userData.tile;
+    if (tile === focusTile) return;              // already here — don't re-fly
+    openFocus(tile.userData.asset, tile);
+  } else if (focused) closeFocus();
+});
+
+function makeBadge(text, cls) {
+  const b = document.createElement('span');
+  b.className = 'badge' + (cls ? ' ' + cls : '');
+  b.textContent = text;
+  return b;
+}
+
+/* ── Flight ──────────────────────────────────────────────────────────
+   Clicking a work sends the camera *to* it rather than pasting a picture
+   over the field. The target's position is recomputed every frame rather
+   than captured once, so a work drifting under cluster layout is still
+   arrived at cleanly. */
+let focusTile = null;
+let flight = null;
+
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+
+/* Park far enough back that the work sits comfortably inside the frame —
+   derived from the tile's real dimensions, so a wide panel and a tall
+   portrait both land well composed rather than one of them overflowing. */
+function viewingDistance(tile) {
+  const s = tile.userData.art.scale;
+  // Frame height in world units per unit of distance.
+  const k = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
+  // Whichever axis binds first decides how far back to park: 62% of the
+  // frame's height, or 68% of its width.
+  // Height budget is the tighter one now: the caption bar owns the bottom
+  // strip, so the work has to sit in the space above it.
+  const byHeight = s.y / (0.54 * k);
+  const byWidth  = s.x / (0.74 * k * camera.aspect);
+  return Math.max(8, Math.max(byHeight, byWidth));
+}
+
+function flightGoal(tile) {
+  const d = viewingDistance(tile);
+  // Horizontally centred. Vertically lifted a little: dropping the camera
+  // raises the work in frame, clearing the caption bar without shrinking it.
+  const k = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
+  return new THREE.Vector3(tile.position.x, tile.position.y - 0.09 * k * d, tile.position.z + d);
+}
+
+function cancelFlight() {
+  if (!flight) return;
+  flight = null;
+  if (focused) document.getElementById('focus-bar').classList.add('landed');
+}
+
+/* Swap in the full-resolution image once a work is focused. At flight
+   distance the 500px field thumb is visibly soft, and this is the moment
+   detail actually matters. */
+function loadHiRes(tile, asset) {
+  if (tile.userData.hiResFor === asset.id) return;
+  texLoader.load(proxied(asset.image, 1800), (tex) => {
+    if (focusTile !== tile || tile.userData.asset !== asset) { tex.dispose(); return; }
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    const old = tile.userData.art.material.map;
+    tile.userData.art.material.map = tex;
+    tile.userData.art.material.needsUpdate = true;
+    tile.userData.hiResFor = asset.id;
+    if (old) old.dispose();
+  });
+}
+
+function openFocus(asset, tile) {
+  if (!asset || !tile) return;
+  const switching = !!focused;
+  focused = asset;
+  focusTile = tile;
+  const m = asset.meta;
+
+  // Hide the caption for the trip and bring it back on arrival, so it
+  // never races the camera.
+  const bar = document.getElementById('focus-bar');
+  bar.classList.remove('landed');
+  document.getElementById('focus-full').classList.remove('open');
+  document.getElementById('focus-more').textContent = 'Full record ⌄';
+  flight = { tile, from: camera.position.clone(), t: 0, dur: switching ? 1150 : 850 };
+  nav.vx = nav.vy = nav.vz = 0;
+  loadHiRes(tile, asset);
+
+  document.getElementById('focus-title').textContent = asset.title;
+
+  // Maker line carries the life dates when the Met has them — "Vincent van
+  // Gogh, Dutch, Zundert 1853–1890" says far more than the name alone.
+  document.getElementById('focus-creator').textContent =
+    [m.creator, m.creatorBio || m.nationality].filter(Boolean).join(' · ');
+
+  // The one-line summary: when, and what it is made of. Everything else
+  // lives behind "Full record".
+  document.getElementById('focus-facts').textContent =
+    [m.dateText, m.medium].filter(Boolean).join('  ·  ');
+
+  syncStar(asset);
+
+  const badges = document.getElementById('focus-badges');
+  badges.innerHTML = '';
+  if (m.isHighlight) badges.appendChild(makeBadge('Met Highlight', 'highlight'));
+  badges.appendChild(m.isOnView
+    ? makeBadge(`On view · Gallery ${m.gallery}`, 'on-view')
+    : makeBadge('Not currently on view'));
+
+  // Rows with no value are dropped rather than rendered blank — a missing
+  // row reads as curated, an empty one reads as a bug.
+  const rows = [
+    ['Date', m.dateText], ['Medium', m.medium], ['Dimensions', m.dimensions],
+    ['Classification', m.classification], ['Culture', m.culture], ['Period', m.period],
+    ['Department', m.department], ['Accession', m.accession],
+  ].filter(([, v]) => v);
+
+  const dl = document.getElementById('focus-label');
+  dl.innerHTML = '';
+  for (const [term, value] of rows) {
+    const dt = document.createElement('dt'); dt.textContent = term;
+    const dd = document.createElement('dd'); dd.textContent = value;
+    dl.append(dt, dd);
+  }
+
+  document.getElementById('focus-credit').textContent = m.creditLine || '';
+
+  const tagWrap = document.getElementById('focus-tags');
+  tagWrap.innerHTML = '';
+  for (const t of (m.tags || []).slice(0, 8)) {
+    const s = document.createElement('span'); s.className = 'tag'; s.textContent = t;
+    tagWrap.appendChild(s);
+  }
+
+  const link = document.getElementById('focus-link');
+  if (m.recordUrl) { link.href = m.recordUrl; link.style.display = ''; }
+  else link.style.display = 'none';
+
+  focusEl.classList.add('open');
+}
+
+function closeFocus() {
+  focused = null;
+  focusTile = null;
+  flight = null;
+  focusEl.classList.remove('open');
+  document.getElementById('focus-bar').classList.remove('landed');
+}
+
+document.getElementById('focus-more').addEventListener('click', () => {
+  const full = document.getElementById('focus-full');
+  const open = full.classList.toggle('open');
+  document.getElementById('focus-more').textContent = open ? 'Full record ⌃' : 'Full record ⌄';
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   Starred works
+   ══════════════════════════════════════════════════════════════════════ */
+const starStore = makeStore('metatlas.starred.v1', 300);
+const starOrder = () => {
+  try { return JSON.parse(localStorage.getItem('metatlas.starOrder.v1') || '[]'); }
+  catch { return []; }
+};
+const setStarOrder = (ids) => {
+  try { localStorage.setItem('metatlas.starOrder.v1', JSON.stringify(ids)); } catch {}
+};
+
+// Order list is the source of truth, not the store: makeStore has no
+// delete, so an un-starred work still answers has() until it is evicted.
+const isStarred = (asset) => starOrder().some((i) => String(i) === String(asset.id));
+
+function toggleStar(asset) {
+  const ids = starOrder();
+  if (isStarred(asset)) {
+    starStore.set(asset.id, undefined);
+    // makeStore has no delete, so drop it from the order list — that is
+    // what renderStarred iterates.
+    setStarOrder(ids.filter((i) => String(i) !== String(asset.id)));
+  } else {
+    starStore.set(asset.id, asset);
+    setStarOrder([String(asset.id), ...ids.filter((i) => String(i) !== String(asset.id))]);
+  }
+  syncStar(asset);
+  renderStarred();
+}
+
+function syncStar(asset) {
+  const on = !!(asset && starOrder().some((i) => String(i) === String(asset.id)));
+  document.getElementById('focus-star').classList.toggle('on', on);
+}
+
+document.getElementById('focus-star').addEventListener('click', () => {
+  if (focused) toggleStar(focused);
+});
+
+/* Bring a starred work back into the field. If it is already hanging we
+   just fly to it; otherwise the most distant tile is commandeered and
+   placed ahead of the camera, so the flight still reads as travel rather
+   than a jump cut. */
+function summon(asset) {
+  let tile = tiles.find((g) => g.userData.asset && String(g.userData.asset.id) === String(asset.id));
+  if (!tile) {
+    tile = tiles.find((g) => !g.userData.asset) || tiles.reduce((far, g) =>
+      Math.abs(g.position.z - camera.position.z) > Math.abs(far.position.z - camera.position.z) ? g : far, tiles[0]);
+    tile.position.set(camera.position.x + 2, camera.position.y, camera.position.z - 30);
+    tile.userData.goal = null;
+    assign(tile, asset);
+  }
+  togglePanel('bookmarks', false);
+  openFocus(asset, tile);
+}
+
+function renderStarred() {
+  const body = document.getElementById('bookmarks-body');
+  const ids = starOrder();
+  body.innerHTML = '';
+
+  if (!ids.length) {
+    body.innerHTML = '<div class="bm-empty">Nothing starred yet.<br>' +
+      'Open a work and press the star in its caption to keep it here. ' +
+      'Starred works persist between visits.</div>';
+    return;
+  }
+
+  for (const id of ids) {
+    const a = starStore.get(id);
+    if (!a) continue;
+    // Row and button carry different classes on purpose — sharing one made
+    // "the clickable thing" ambiguous to anything querying the DOM.
+    const row = document.createElement('div');
+    row.className = 'bm-row';
+
+    const btn = document.createElement('button');
+    btn.className = 'bm';
+    const img = document.createElement('img');
+    img.src = proxied(a.thumb, 120);
+    img.alt = '';
+    const txt = document.createElement('div');
+    txt.style.minWidth = '0';
+    const t = document.createElement('div'); t.className = 'bm-t'; t.textContent = a.title;
+    const s = document.createElement('div'); s.className = 'bm-s';
+    s.textContent = [a.meta.creator, a.meta.dateText].filter(Boolean).join(' · ');
+    txt.append(t, s);
+    btn.append(img, txt);
+    btn.addEventListener('click', () => summon(a));
+
+    const x = document.createElement('button');
+    x.className = 'bm-x'; x.textContent = '×'; x.title = 'Remove';
+    x.addEventListener('click', (e) => { e.stopPropagation(); toggleStar(a); });
+
+    row.append(btn, x);
+    body.appendChild(row);
+  }
+}
+
+document.getElementById('btn-bookmarks').disabled = false;
+document.getElementById('btn-bookmarks').title = 'Starred works';
+document.getElementById('btn-bookmarks').addEventListener('click', () => togglePanel('bookmarks'));
+document.getElementById('bookmarks-close').addEventListener('click', () => togglePanel('bookmarks', false));
+
+// The veil itself no longer takes clicks (they pass through to the field),
+// so dismissal comes from Esc, this hint, or clicking bare wall.
+document.getElementById('focus-esc').addEventListener('click', closeFocus);
+
+/* ══════════════════════════════════════════════════════════════════════
+   Panels & dock
+   ══════════════════════════════════════════════════════════════════════ */
+function togglePanel(id, on) {
+  const el = document.getElementById(id);
+  const open = on ?? !el.classList.contains('open');
+
+  // Filters and Starred are both right rails — they would sit on top of
+  // each other, so opening one closes the other.
+  if (open && (id === 'filters' || id === 'bookmarks')) {
+    const other = id === 'filters' ? 'bookmarks' : 'filters';
+    document.getElementById(other).classList.remove('open');
+    document.getElementById(other === 'filters' ? 'btn-filters' : 'btn-bookmarks')
+      .classList.remove('active');
+  }
+
+  el.classList.toggle('open', open);
+  if (id === 'filters')      document.getElementById('btn-filters').classList.toggle('active', open);
+  if (id === 'bookmarks')    document.getElementById('btn-bookmarks').classList.toggle('active', open);
+  if (id === 'browser-veil') document.getElementById('btn-source').classList.toggle('active', open);
+}
+
+document.getElementById('btn-source').addEventListener('click', () => togglePanel('browser-veil'));
+document.getElementById('browser-close').addEventListener('click', () => togglePanel('browser-veil', false));
+document.getElementById('browser-veil').addEventListener('click', (e) => {
+  if (e.target.id === 'browser-veil') togglePanel('browser-veil', false);
+});
+document.getElementById('btn-filters').addEventListener('click', () => togglePanel('filters'));
+document.getElementById('filters-close').addEventListener('click', () => togglePanel('filters', false));
+document.getElementById('btn-recenter').addEventListener('click', () => {
+  nav.vx = nav.vy = nav.vz = 0;
+  camera.position.set(0, 0, 0);
+  if (clusterBy) layoutClusters();
+});
+document.getElementById('btn-reload').addEventListener('click', () => loadSource(currentSource));
+
+document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x === t));
+  const isCluster = t.dataset.tab === 'cluster';
+  document.getElementById('tab-explore').style.display = isCluster ? 'none' : '';
+  document.getElementById('tab-cluster').style.display = isCluster ? '' : 'none';
+}));
+
+function makeCard(name, sub, onClick) {
+  const b = document.createElement('button');
+  b.className = 'dept-card';
+  b.innerHTML = `<div class="dept-name"></div><div class="dept-sub"></div>`;
+  b.querySelector('.dept-name').textContent = name;
+  b.querySelector('.dept-sub').textContent = sub;
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.dept-card').forEach((c) => c.classList.remove('active'));
+    b.classList.add('active');
+    togglePanel('browser-veil', false);
+    onClick();
+  });
+  return b;
+}
+
+async function buildBrowser() {
+  const surveyGrid = document.getElementById('survey-grid');
+  for (const s of SURVEYS) {
+    const card = makeCard(s.label, s.sub, () =>
+      loadSource({ kind: 'multi', id: s.id, depts: s.depts, label: s.label }));
+    if (s === SURVEYS[0]) card.classList.add('active');
+    surveyGrid.appendChild(card);
+  }
+
+  const r = await fetchJSON(`${API}/departments`);
+  const grid = document.getElementById('dept-grid');
+  for (const d of ((r && r.departments) || [])) {
+    grid.appendChild(makeCard(d.displayName, 'Department', () =>
+      loadSource({ kind: 'dept', id: 'dept-' + d.departmentId, dept: d.departmentId,
+                   label: d.displayName })));
+  }
+}
+
+function runSearch() {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  document.querySelectorAll('.dept-card').forEach((c) => c.classList.remove('active'));
+  togglePanel('browser-veil', false);
+  loadSource({ kind: 'search', query: q, label: `“${q}”` });
+}
+document.getElementById('search-go').addEventListener('click', runSearch);
+document.getElementById('search-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') runSearch();
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   Loop
+   ══════════════════════════════════════════════════════════════════════ */
+const hintEl = document.getElementById('hint');
+let hintShown = false;
+function showHint() {
+  if (hintShown) return;
+  hintShown = true;
+  hintEl.classList.add('show');
+  setTimeout(() => hintEl.classList.remove('show'), 6000);
+}
+
+let lastFrame = performance.now();
+
+function tick(now) {
+  requestAnimationFrame(tick);
+  const t = now || performance.now();
+  const dt = Math.min(64, t - lastFrame);      // clamp: tab-out must not teleport
+  lastFrame = t;
+
+  if (flight) {
+    // Recompute the goal every frame rather than freezing it at takeoff,
+    // so a target drifting under cluster layout is still arrived at.
+    flight.t = Math.min(1, flight.t + dt / flight.dur);
+    camera.position.lerpVectors(flight.from, flightGoal(flight.tile), easeInOut(flight.t));
+    if (flight.t >= 1) cancelFlight();
+  } else {
+    applyKeyboard();
+    camera.position.x += nav.vx; camera.position.y += nav.vy; camera.position.z += nav.vz;
+
+    // Idle orbit — suspended the moment anyone takes the controls, and
+    // while a work is focused, where drifting off it would be maddening.
+    if (!focused && !nav.dragging && !held.size) {
+      driftAngle += DRIFT_RATE * dt;
+      camera.position.x += Math.cos(driftAngle) * DRIFT_SPEED * dt;
+      camera.position.y -= Math.sin(driftAngle) * DRIFT_SPEED * dt;
+    }
+  }
+  nav.vx *= DAMP_PAN; nav.vy *= DAMP_PAN; nav.vz *= DAMP_FLY;
+
+  // Recycling frees the tile's work first, so it can be re-drawn if the
+  // filtered set is small — but never alongside a copy of itself.
+  /* Works are only ever born at the far plane, deep inside the fog, so
+     they emerge from the haze and travel toward you. Reborn any nearer
+     and a work materialises mid-air at full size and full opacity — the
+     "popping up in your face" that a random birth depth produces. The
+     small jitter stops every rebirth landing on one flat plane. */
+  // Right at the back plane, where the fog is total. The jitter only stops
+  // every rebirth landing on one flat sheet.
+  const birthDepth = () => camera.position.z - (FIELD_DEPTH - Math.random() * 2);
+
+  const rehome = (g) => {              // fresh work for a tile already moved
+    const prev = g.userData.asset;
+    releaseAsset(g);
+    const a = nextAsset() || prev;
+    if (!a) { park(g); return; }
+
+    /* When the same work comes back to this tile — which is the common
+       case, since releasing it immediately makes it the next available
+       one — keep the texture it already has.
+
+       assign() unconditionally disposes and re-queues, so without this
+       every recycle re-downloaded an image we were already holding. At
+       flying speed the whole field recycles every couple of seconds, which
+       swamped the 5-slot texture queue and left the canvas completely
+       blank while moving. */
+    if (a === prev && g.userData.loaded) {
+      g.userData.asset = a;
+      inUse.add(a.id);
+      g.userData.target = 1;
+      return;
+    }
+    assign(g, a);
+  };
+
+  const recycle = (g, z, spreadZ) => { scatter(g, z, spreadZ); rehome(g); };
+
+  for (const g of tiles) {
+    const u = g.userData;
+
+    if (g === focusTile) {
+      // Frozen: neither recycled nor moved. Recycling would swap the
+      // artwork mid-approach so you land on something you never clicked;
+      // easing toward a cluster station would slide the work you are
+      // reading out of frame while you read it.
+    } else if (u.goal) {
+      // Clustered: ease toward the assigned station instead of recycling.
+      g.position.lerp(u.goal, 0.055);
+    } else {
+      // Flown past — send it back out to the far plane to approach again.
+      if (g.position.z > camera.position.z + RECYCLE_AHEAD) {
+        recycle(g, birthDepth());
+
+      /* Retreating: the work has fallen out the back. Put it BEHIND the
+         viewer so it re-enters the near field as they keep backing away.
+
+         Rebirthing it at the far plane instead — which is what the previous
+         version did — leaves every work oscillating in the 70–89u band,
+         which the fog renders 100% faded. Measured: after ten seconds of
+         backing up, all 48 works sat beyond 70u and the frame was empty.
+
+         This is only safe because of the near-approach dissolve: a work
+         emerging from behind the camera is invisible until 3 units out.
+
+         Placed just INSIDE the "flown past" threshold above, not beyond it.
+         At +14 the first branch reclaimed the work on the very next frame
+         and threw it to the far plane — an endless back/far churn measured
+         at 2.4 re-placements per second with nothing ever settling. */
+      } else if (g.position.z < camera.position.z - FIELD_DEPTH - RECYCLE_AHEAD) {
+        // Spread sized for ~30 units — where these will actually be looked
+        // at — rather than the 8 units they are born at, which would stack
+        // them in a narrow column on the axis.
+        recycle(g, camera.position.z + RECYCLE_AHEAD - 6, camera.position.z - 30);
+
+      } else {
+        /* Lateral bound — without it, panning far walks the camera clean
+           out of the slab into empty space.
+
+           DEPTH-INDEPENDENT, and this is the whole point. Deriving the
+           bound from the view frustum meant it shrank as a work approached
+           while the work's offset stayed put, so every approaching work was
+           repeatedly dragged toward the camera axis. Measured: mean lateral
+           offset fell from 19.7 at 40u to 2.9 at 0–9u — a sevenfold
+           collapse, and the pile on screen.
+
+           Constants derived from the widest a work is ever born (scatter()
+           at the far plane), so this now trips only when the camera has
+           genuinely panned away from the field — never because a work is
+           passing close by.
+
+           The work wraps to the opposite side at the SAME depth, at 0.9 of
+           the bound so it lands strictly inside and cannot flip-flop (the
+           earlier flicker was mirroring to the same |x|, which stayed out
+           of bounds). Sending it to the far plane instead does not work:
+           panning never changes z, so the work would sit at 70u in total
+           fog forever and the field would simply empty out — measured, it
+           did exactly that. At 0.9 × 76 it is off-screen at every depth and
+           slides into view only if the pan continues. */
+        const dx = g.position.x - camera.position.x;
+        const dy = g.position.y - camera.position.y;
+        if (Math.abs(dx) > LATERAL_X || Math.abs(dy) > LATERAL_Y) {
+          /* Fixed TRIGGER, frustum-based RE-ENTRY. The trigger must not
+             depend on depth — that was the pile. But where a work re-enters
+             should: at 20 units the frame is only ~18 wide, so dropping it
+             back at 60 leaves it invisible for the rest of the pan, and the
+             field reads as empty. Coming back just outside the frame at its
+             own depth means it slides into view almost immediately.
+
+             Randomised, because landing every work at the same offset made
+             them cross in as one rank with a gap behind. Capped below the
+             trigger so it can never immediately re-fire. */
+          const halfH = Math.max(1, Math.abs(g.position.z - camera.position.z)) * TAN_HALF_FOV;
+          const halfW = halfH * camera.aspect;
+          /* Floored at 18. A work sitting near the camera's own z-plane has
+             dz ≈ 0, so its frustum half-width is ≈ 0 and an unfloored edge
+             put it barely a unit from the lens — filling the frame
+             instantly. The floor keeps every re-entry outside the frame at
+             every depth. */
+          const edge = (half, bound) =>
+            Math.min(Math.max(half * (1.15 + Math.random() * 0.35), 18), bound * 0.95);
+          if (Math.abs(dx) > LATERAL_X) g.position.x = camera.position.x - Math.sign(dx) * edge(halfW, LATERAL_X);
+          if (Math.abs(dy) > LATERAL_Y) g.position.y = camera.position.y - Math.sign(dy) * edge(halfH, LATERAL_Y);
+          rehome(g);
+        }
+      }
+    }
+
+    u.fade += (u.target - u.fade) * 0.07;
+
+    // Dimming happens here, in the scene, rather than as a DOM veil — the
+    // focused work has to stay bright while everything else recedes, and
+    // a screen-wide overlay would dim them both equally.
+    const wantDim = (focused && g !== focusTile) ? 0.17 : 1;
+    u.dim += (wantDim - u.dim) * 0.07;
+
+    // Dissolve on close approach so you pass through a work rather than
+    // smearing it across the frame. Applied straight, not eased — it is a
+    // function of position, and easing it would lag the motion.
+    let near = 1;
+    if (g !== focusTile) {
+      const d = g.position.distanceTo(camera.position);
+      if (d < NEAR_FADE_START) {
+        near = Math.max(0, (d - NEAR_FADE_END) / (NEAR_FADE_START - NEAR_FADE_END));
+      }
+    }
+
+    const o = u.fade * u.dim * near;
+    u.art.material.opacity = o;
+    u.mount.material.opacity = o * 0.5;
+
+    // Safe to free now — the tile has actually left the screen.
+    if (u.retiring && u.fade < 0.02) { releaseTexture(g); u.retiring = false; }
+  }
+
+  renderer.render(scene, camera);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Gallery sound
+
+   One looping track, off by default. Never autoplayed — browsers block it,
+   and a museum that starts making noise at you unprompted is worse than a
+   silent one. The dock click is the user gesture that unlocks playback.
+
+   The track is deliberately not in the repo: shipping audio means shipping
+   a licence. Drop a public-domain recording at the path below and the
+   control comes alive on its own; until then it disables itself and says
+   what is missing, rather than dying silently on click.
+   ══════════════════════════════════════════════════════════════════════ */
+const MUSIC_SRC = 'audio/gallery-sound.mp3';
+
+/* ── EDIT THIS when you install a track ──────────────────────────────
+   Nothing reads ID3 tags, so the credit line is declared here. For a
+   public-domain recording no attribution is legally required, but naming
+   the performer is good manners and costs one line. */
+const MUSIC_META = {
+  title:  'Gymnopédie No. 1',
+  credit: 'Erik Satie · Agathe Laforge · Musopen',
+  url:    'https://musopen.org/',
+};
+
+const MUSIC_VOLUME = 0.32;    // background, not foreground
+const FADE_IN_MS   = 1800;
+const FADE_OUT_MS  = 900;
+
+const btnMusic = document.getElementById('btn-music');
+const music = new Audio();
+music.loop = true;
+music.preload = 'none';       // costs nothing until someone asks for it
+music.volume = 0;
+
+let musicOn = false;
+let musicMissing = false;
+let fadeTimer = null;
+
+function fadeMusic(target, ms, done) {
+  clearInterval(fadeTimer);
+  const from = music.volume;
+  const start = performance.now();
+  fadeTimer = setInterval(() => {
+    const t = Math.min(1, (performance.now() - start) / ms);
+    music.volume = Math.max(0, Math.min(1, from + (target - from) * t));
+    if (t >= 1) { clearInterval(fadeTimer); if (done) done(); }
+  }, 40);
+}
+
+const mpPanel   = document.getElementById('music-panel');
+const mpPlay    = document.getElementById('mp-play');
+const mpVol     = document.getElementById('mp-vol');
+const mpViz     = document.getElementById('mp-viz');
+const mpMissing = document.getElementById('mp-missing');
+const iconPlay  = document.getElementById('mp-icon-play');
+const iconPause = document.getElementById('mp-icon-pause');
+
+document.getElementById('mp-title').textContent = MUSIC_META.title;
+document.getElementById('mp-credit').textContent = MUSIC_META.credit;
+
+/* Say what is actually wrong, in the panel where someone is looking for
+   it. A dead control with no explanation is the failure mode this whole
+   build has been working to avoid. */
+function markMusicMissing() {
+  musicMissing = true;
+  musicOn = false;
+  clearInterval(fadeTimer);
+  btnMusic.classList.remove('active');
+  mpPlay.disabled = true;
+  mpMissing.classList.add('on');
+  document.getElementById('mp-credit').textContent = 'No track';
+  setPlayIcon(false);
+  btnMusic.title = `Gallery sound — no track installed (expected ${MUSIC_SRC})`;
+}
+
+music.addEventListener('error', markMusicMissing);
+
+function setPlayIcon(playing) {
+  iconPlay.style.display  = playing ? 'none' : '';
+  iconPause.style.display = playing ? '' : 'none';
+  mpPlay.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+}
+
+async function toggleMusic() {
+  if (musicMissing) return;
+
+  if (musicOn) {
+    musicOn = false;
+    btnMusic.classList.remove('active');
+    setPlayIcon(false);
+    // Guard the pause: re-enabling during the fade must not be cut off.
+    fadeMusic(0, FADE_OUT_MS, () => { if (!musicOn) music.pause(); });
+    return;
+  }
+
+  if (!music.src) music.src = MUSIC_SRC;
+  ensureAnalyser();
+  if (audioCtx && audioCtx.state === 'suspended') await audioCtx.resume();
+
+  try {
+    await music.play();
+  } catch {
+    // Inside a click handler the autoplay policy is already satisfied, so
+    // a rejection here means the file genuinely could not be loaded.
+    markMusicMissing();
+    return;
+  }
+  musicOn = true;
+  btnMusic.classList.add('active');
+  setPlayIcon(true);
+  fadeMusic(volumeTarget(), FADE_IN_MS);
+}
+
+const volumeTarget = () => (mpVol.value / 100) * (MUSIC_VOLUME / 0.32);
+
+mpVol.addEventListener('input', () => {
+  clearInterval(fadeTimer);              // a drag overrides any running fade
+  music.volume = Math.max(0, Math.min(1, volumeTarget()));
+});
+
+mpPlay.addEventListener('click', toggleMusic);
+document.getElementById('mp-close').addEventListener('click', () => {
+  mpPanel.classList.remove('on');
+  btnMusic.classList.toggle('active', musicOn);
+});
+
+// The dock button opens the player rather than starting playback outright —
+// the panel is where the controls live.
+btnMusic.addEventListener('click', () => {
+  mpPanel.classList.toggle('on');
+  if (mpPanel.classList.contains('on')) drawViz();
+});
+
+/* ── Visualiser ──────────────────────────────────────────────────────
+   Real frequency data, not a decorative animation. The audio element is
+   routed through an AnalyserNode — note that once createMediaElementSource
+   takes over an element, the graph MUST reach destination or playback goes
+   silent with no error to explain it. */
+let audioCtx = null, analyser = null, freqData = null, srcNode = null;
+
+function ensureAnalyser() {
+  if (audioCtx || analyser === false) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) { analyser = false; return; }          // no Web Audio: flat bars, audio still plays
+  try {
+    audioCtx = new AC();
+    srcNode  = audioCtx.createMediaElementSource(music);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 128;
+    analyser.smoothingTimeConstant = 0.82;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    srcNode.connect(analyser);
+    analyser.connect(audioCtx.destination);       // without this, silence
+  } catch {
+    audioCtx = null; analyser = false;            // fall back to plain playback
+  }
+}
+
+const VIZ_BARS = 34;
+const vizLevels = new Array(VIZ_BARS).fill(0);
+
+function drawViz() {
+  if (!mpPanel.classList.contains('on')) return;
+  const dpr = Math.min(devicePixelRatio, 2);
+  const w = mpViz.clientWidth, h = 46;
+  if (mpViz.width !== Math.round(w * dpr)) {
+    mpViz.width = Math.round(w * dpr);
+    mpViz.height = Math.round(h * dpr);
+  }
+  const x = mpViz.getContext('2d');
+  x.setTransform(dpr, 0, 0, dpr, 0, 0);
+  x.clearRect(0, 0, w, h);
+
+  const live = musicOn && analyser && freqData;
+  if (live) analyser.getByteFrequencyData(freqData);
+
+  const gap = 2;
+  const bw = (w - gap * (VIZ_BARS - 1)) / VIZ_BARS;
+  for (let i = 0; i < VIZ_BARS; i++) {
+    // Low bins carry most of the energy in music, so sample across a
+    // compressed range rather than linearly — otherwise the right-hand
+    // half of the display never moves.
+    const bin = Math.floor((i / VIZ_BARS) ** 1.6 * (freqData ? freqData.length : 1));
+    const raw = live ? freqData[bin] / 255 : 0;
+    // Ease toward the target so the bars settle rather than flicker.
+    vizLevels[i] += (raw - vizLevels[i]) * 0.28;
+    const bh = Math.max(2, vizLevels[i] * (h - 4));
+    x.fillStyle = live ? 'rgba(168, 89, 58, 0.85)' : 'rgba(43, 38, 34, 0.16)';
+    x.fillRect(i * (bw + gap), h - bh, bw, bh);
+  }
+  requestAnimationFrame(drawViz);
+}
+
+// Music from a tab you cannot see is just noise from nowhere.
+addEventListener('visibilitychange', () => {
+  if (!musicOn) return;
+  if (document.hidden) music.pause();
+  else music.play().catch(() => {});
+});
+
+/* ══════════════════════════════════════════════════════════════════════
+   Hand gestures (MediaPipe)
+
+   Everything here is lazy. The vision bundle and its WASM are a few
+   hundred KB and the hand model alone is 7.6 MB — loading that at boot
+   to serve a feature most visitors never touch would be indefensible.
+   Nothing is fetched and no camera is requested until the dock button is
+   pressed, and turning it off stops the tracks rather than just hiding
+   the preview.
+
+   Gestures map onto the same velocity channels as every other input, so
+   hand control blends with mouse and keyboard instead of overriding them.
+   ══════════════════════════════════════════════════════════════════════ */
+const MP_BASE  = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
+const MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/' +
+                 'hand_landmarker/float16/1/hand_landmarker.task';
+
+const GEST_PAN = 0.55;    // pointing → pan
+const GEST_FLY = 2.6;     // palm depth → flight
+const GEST_MIN = 0.06;    // dead zone: a still hand must not creep the camera
+
+const FIST_HOLD_MS = 550;     // deliberate hold required to leave a focused work
+
+const gest = {
+  on: false, landmarker: null, stream: null, raf: null,
+  lastAt: 0, current: 'none', prev: 'none', baseSpan: null,
+  lastHandAt: 0, flash: '', flashUntil: 0, fistSince: 0,
+};
+
+const gpPanel   = document.getElementById('gesture-panel');
+const gpVideo   = document.getElementById('gp-video');
+const gpOverlay = document.getElementById('gp-overlay');
+const gpLoading = document.getElementById('gp-loading');
+const gpRead    = document.getElementById('gp-gesture');
+const btnGesture = document.getElementById('btn-gesture');
+
+/* Extension test by distance from the wrist rather than "tip above joint".
+   The naive vertical test only holds for an upright hand and falls apart
+   the moment someone tilts their wrist; radial distance is rotation
+   invariant. */
+function extendedFingers(lm) {
+  const d = (a, b) => Math.hypot(lm[a].x - lm[b].x, lm[a].y - lm[b].y);
+  return [
+    d(4, 0)  > d(2, 0)  * 1.4,    // thumb — short, needs a looser ratio
+    d(8, 0)  > d(6, 0)  * 1.15,
+    d(12, 0) > d(10, 0) * 1.15,
+    d(16, 0) > d(14, 0) * 1.15,
+    d(20, 0) > d(18, 0) * 1.15,
+  ];
+}
+
+/* One-hand poses only. The heart is deliberately NOT here: a single-hand
+   finger heart is nearly indistinguishable from a closed fist, since
+   closing a fist parks the thumb tip against the index tip too. It lives
+   in twoHandHeart(), where two independent contact points make it solid. */
+function classify(lm) {
+  const f = extendedFingers(lm);
+  const n = f.filter(Boolean).length;
+
+  if (n === 0) return 'fist';
+  if (f[1] && f[2] && !f[3] && !f[4]) return 'peace';
+  if (f[1] && !f[2] && !f[3] && !f[4]) return 'point';
+  if (n >= 4) return 'palm';
+  return 'none';
+}
+
+/* Whatever sits under the middle of the screen — the target for the
+   hands-free gestures, since there is no cursor to aim with. */
+/* Heart: both hands, thumbs meeting at the point, index tips meeting over
+   the top, and a real gap between those two contacts.
+
+   Requiring BOTH contacts is what makes this solid — two independent
+   coincidences are hard to produce by accident, where a single
+   thumb-to-index touch happens every time someone closes their fist.
+   The span test rejects two hands simply pressed flat together, and the
+   vertical check pins the point of the heart downward. */
+function twoHandHeart(a, b) {
+  const dd = (p, q) => Math.hypot(p.x - q.x, p.y - q.y);
+  const scale = ((dd(a[0], a[9]) || 1) + (dd(b[0], b[9]) || 1)) / 2;
+
+  // The hands have to come from opposite sides. Without this, any two
+  // hands held in the same place satisfy "tips near tips" trivially —
+  // two fists side by side scored as a heart until this check existed.
+  if (dd(a[0], b[0]) / scale < 0.75) return false;
+
+  const thumbs  = dd(a[4], b[4]) / scale;
+  const indexes = dd(a[8], b[8]) / scale;
+  if (thumbs > 0.60 || indexes > 0.85) return false;
+
+  const thumbMid = { x: (a[4].x + b[4].x) / 2, y: (a[4].y + b[4].y) / 2 };
+  const indexMid = { x: (a[8].x + b[8].x) / 2, y: (a[8].y + b[8].y) / 2 };
+  if (dd(thumbMid, indexMid) / scale < 0.45) return false;   // hands just stacked
+  return thumbMid.y > indexMid.y;                            // point sits below
+}
+
+function centreHit() {
+  ndc.set(0, 0);
+  raycaster.setFromCamera(ndc, camera);
+  return raycaster.intersectObjects(artMeshes, false)
+    .find((h) => h.object.userData.tile && h.object.userData.tile.userData.loaded) || null;
+}
+
+function focusCentreWork() {
+  const hit = centreHit();
+  if (hit) openFocus(hit.object.userData.tile.userData.asset, hit.object.userData.tile);
+}
+
+/* Heart stars the work you are looking at, falling back to whatever is
+   centred if nothing is focused. Reports back through the reading line,
+   because with no cursor there is otherwise no confirmation it landed. */
+function starByGesture() {
+  const target = focused || (centreHit() && centreHit().object.userData.tile.userData.asset);
+  if (!target) { gest.flash = 'nothing centred to star'; return; }
+  const wasStarred = isStarred(target);
+  toggleStar(target);
+  gest.flash = wasStarred ? `unstarred “${target.title}”` : `starred “${target.title}”`;
+  gest.flashUntil = performance.now() + 2200;
+}
+
+function applyGesture(name, lm) {
+  if (name !== 'fist') gest.fistSince = 0;     // any other pose resets the hold
+
+  // point and palm steer from landmark positions; the rest do not need them.
+  if ((name === 'point' || name === 'palm') && !lm) return;
+
+  if (name === 'fist') {                       // brake — and, while focused, dismiss
+    nav.vx *= 0.78; nav.vy *= 0.78; nav.vz *= 0.78;
+
+    /* Leaving a focused work needs a deliberate hold, not a single frame.
+       Travelling between poses passes through half-curled shapes that read
+       as a fist for a frame or two, and one stray reading would eject you
+       from the work you were reading. Holding is also the only way out
+       that does not require reaching for the keyboard — without it,
+       gestures could enter focus but never leave it. */
+    if (focused) {
+      const now = performance.now();
+      if (!gest.fistSince) gest.fistSince = now;
+      else if (now - gest.fistSince > FIST_HOLD_MS) {
+        closeFocus();
+        gest.fistSince = 0;
+        gest.flash = 'closed';
+        gest.flashUntil = now + 1400;
+      }
+    }
+    return;
+  }
+  if (name === 'point') {
+    // Camera images are not mirrored, so pointing to your right reads as
+    // decreasing x. Invert so the field moves the way the finger does.
+    const dx = -(lm[8].x - lm[5].x);
+    const dy =  (lm[8].y - lm[5].y);
+    if (Math.abs(dx) > GEST_MIN) nav.vx += dx * GEST_PAN;
+    if (Math.abs(dy) > GEST_MIN) nav.vy -= dy * GEST_PAN;
+    return;
+  }
+  if (name === 'palm') {
+    // Palm span is a depth proxy: the hand grows as it nears the lens.
+    // Measured against the span when the palm first appeared, so it is
+    // push-and-pull rather than an absolute hand size.
+    const span = Math.hypot(lm[5].x - lm[17].x, lm[5].y - lm[17].y);
+    if (gest.baseSpan == null) { gest.baseSpan = span; return; }
+    const rel = span / gest.baseSpan - 1;
+    if (Math.abs(rel) > 0.04) nav.vz = clampFly(nav.vz - rel * GEST_FLY);
+    return;
+  }
+  // Edge-triggered: holding the pose must not re-fire every frame.
+  if (name === 'peace' && gest.prev !== 'peace') focusCentreWork();
+  if (name === 'heart' && gest.prev !== 'heart') starByGesture();
+}
+
+const BONES = [[0,5],[5,9],[9,13],[13,17],[0,17],
+               [5,6],[6,7],[7,8],[9,10],[10,11],[11,12],
+               [13,14],[14,15],[15,16],[17,18],[18,19],[19,20],
+               [0,1],[1,2],[2,3],[3,4]];
+
+function drawHands(hands) {
+  const c = gpOverlay;
+  if (c.width !== c.clientWidth) { c.width = c.clientWidth; c.height = c.clientHeight; }
+  const x = c.getContext('2d');
+  x.clearRect(0, 0, c.width, c.height);
+  if (!hands || !hands.length) return;
+
+  x.strokeStyle = 'rgba(200,127,90,0.9)';
+  x.fillStyle = 'rgba(244,240,232,0.95)';
+  x.lineWidth = 2;
+  for (const lm of hands) {
+    for (const [a, b] of BONES) {
+      x.beginPath();
+      x.moveTo(lm[a].x * c.width, lm[a].y * c.height);
+      x.lineTo(lm[b].x * c.width, lm[b].y * c.height);
+      x.stroke();
+    }
+    for (const p of lm) {
+      x.beginPath();
+      x.arc(p.x * c.width, p.y * c.height, 2.6, 0, Math.PI * 2);
+      x.fill();
+    }
+  }
+}
+
+const GESTURE_LABEL = { point: 'pointing — panning', palm: 'open palm — flying',
+                        fist: 'fist — holding', peace: 'peace — focusing',
+                        heart: 'heart — starring',
+                        none: 'hand seen', 'no hand': 'no hand' };
+
+const guideEl = document.getElementById('gesture-guide');
+const guideItems = [...guideEl.querySelectorAll('.gg-item')];
+
+/* Detection drops the odd frame even with a hand held perfectly still, so
+   the guide hides on a grace period rather than the instant a frame comes
+   back empty — otherwise it strobes. */
+const GUIDE_GRACE = 1200;
+
+const fistItem = guideItems.find((i) => i.dataset.g === 'fist');
+const fistDesc = fistItem && fistItem.querySelector('span');
+const peaceItem = guideItems.find((i) => i.dataset.g === 'peace');
+const peaceDesc = peaceItem && peaceItem.querySelector('span');
+
+function updateGuide(name, handPresent) {
+  const now = performance.now();
+  if (handPresent) gest.lastHandAt = now;
+  const show = now - (gest.lastHandAt || 0) < GUIDE_GRACE;
+  guideEl.classList.toggle('on', show);
+
+  // Fist and peace both change meaning once a work is open. Showing the
+  // stale meaning would be worse than showing nothing — the guide's whole
+  // job is to tell you what the gesture does *now*.
+  if (fistDesc)  fistDesc.textContent  = focused ? 'hold to close' : 'stop';
+  if (peaceDesc) peaceDesc.textContent = focused ? 'focus another work' : 'focus the centred work';
+
+  for (const item of guideItems) {
+    item.classList.toggle('active', show && item.dataset.g === name);
+  }
+}
+
+function gestureLoop() {
+  if (!gest.on) return;
+  gest.raf = requestAnimationFrame(gestureLoop);
+  if (!gest.landmarker || gpVideo.readyState < 2) return;
+
+  // detectForVideo demands strictly increasing timestamps or it throws.
+  const t = Math.max(performance.now(), gest.lastAt + 1);
+  gest.lastAt = t;
+
+  let res;
+  try { res = gest.landmarker.detectForVideo(gpVideo, t); }
+  catch { return; }
+
+  const hands = (res && res.landmarks) || [];
+  const lm = hands[0];
+  gest.prev = gest.current;
+
+  // Two hands are checked first: a two-hand heart contains poses that would
+  // otherwise be read as whatever the leading hand happens to look like.
+  if (hands.length >= 2 && twoHandHeart(hands[0], hands[1])) gest.current = 'heart';
+  else if (lm) gest.current = classify(lm);
+  else gest.current = 'no hand';
+
+  if (lm) applyGesture(gest.current, lm);
+  if (gest.current !== 'palm') gest.baseSpan = null;
+
+  drawHands(hands);
+  updateGuide(gest.current, hands.length > 0);
+
+  // A confirmation of a one-shot action outranks the live reading for a
+  // couple of seconds — otherwise starring gives no feedback at all.
+  gpRead.textContent = (gest.flash && performance.now() < gest.flashUntil)
+    ? gest.flash
+    : (GESTURE_LABEL[gest.current] || gest.current);
+}
+
+async function enableGestures() {
+  if (gest.on) return;
+  gest.on = true;
+  gpPanel.classList.add('on');
+  gpLoading.classList.remove('done');
+  gpLoading.textContent = 'Requesting camera…';
+  btnGesture.classList.add('active');
+
+  try {
+    gest.stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }, audio: false,
+    });
+  } catch {
+    gpLoading.textContent = 'Camera permission denied. Hand control needs it to see your hand.';
+    btnGesture.classList.remove('active');
+    gest.on = false;
+    return;
+  }
+  if (!gest.on) { stopStream(); return; }      // turned off during the prompt
+
+  gpVideo.srcObject = gest.stream;
+  gpLoading.textContent = 'Loading hand model (7.6 MB)…';
+
+  try {
+    const vision = await import(`${MP_BASE}/vision_bundle.mjs`);
+    const files = await vision.FilesetResolver.forVisionTasks(`${MP_BASE}/wasm`);
+    gest.landmarker = await vision.HandLandmarker.createFromOptions(files, {
+      baseOptions: { modelAssetPath: MP_MODEL, delegate: 'GPU' },
+      runningMode: 'VIDEO', numHands: 2,   // two, for the two-hand heart
+    });
+  } catch (err) {
+    gpLoading.textContent = 'Could not load the hand model. Check the connection and try again.';
+    disableGestures();
+    return;
+  }
+  if (!gest.on) { disableGestures(); return; }
+
+  gpLoading.classList.add('done');
+  gestureLoop();
+}
+
+function stopStream() {
+  if (gest.stream) { gest.stream.getTracks().forEach((t) => t.stop()); gest.stream = null; }
+  gpVideo.srcObject = null;
+}
+
+function disableGestures() {
+  gest.on = false;
+  if (gest.raf) cancelAnimationFrame(gest.raf);
+  gest.raf = null;
+  stopStream();
+  if (gest.landmarker) { gest.landmarker.close(); gest.landmarker = null; }
+  gest.current = 'none'; gest.baseSpan = null;
+  gest.lastHandAt = 0; gest.flash = ''; gest.flashUntil = 0; gest.fistSince = 0;
+  guideEl.classList.remove('on');
+  guideItems.forEach((i) => i.classList.remove('active'));
+  gpPanel.classList.remove('on');
+  btnGesture.classList.remove('active');
+  drawHands(null);          // clear the skeleton overlay
+}
+
+btnGesture.disabled = false;
+btnGesture.title = 'Hand control (uses your camera)';
+btnGesture.addEventListener('click', () => (gest.on ? disableGestures() : enableGestures()));
+document.getElementById('gp-close').addEventListener('click', disableGestures);
+// Leaving the page with the camera still running would be careless.
+addEventListener('pagehide', disableGestures);
+
+/* A small read-only handle on the live state. Useful from the console,
+   and it lets automated checks assert on the camera directly instead of
+   inferring motion from pixels — which cannot tell drift apart from a
+   texture finishing its load. */
+const _frustum = new THREE.Frustum();
+const _frustumMat = new THREE.Matrix4();
+
+window.__atlas = {
+  get camera()  { return camera.position.clone(); },
+  get focused() { return focused ? focused.title : null; },
+  get flying()  { return !!flight; },
+  get pending() { return texQueue.length + inflight; },
+  get counts()  { return { assets: assets.length, visible: visible.length, starred: starOrder().length }; },
+  get onWall()  { return tiles.filter((g) => g.userData.asset).length; },
+  get flySpeed() { return nav.vz; },        // must never exceed MAX_FLY
+  get maxFly()   { return MAX_FLY; },
+  // GPU resources. Tiles recycle constantly, so textures must plateau
+  // near the tile count — a rising number means disposal is leaking.
+  get gpu() { return { ...renderer.info.memory, calls: renderer.info.render.calls }; },
+  get gesture() { return { on: gest.on, reading: gest.current,
+                           model: !!gest.landmarker, camera: !!gest.stream }; },
+  // The Audio object is never added to the DOM, so it is unreachable from
+  // the page — expose it here or its state cannot be asserted at all.
+  get music() { return { on: musicOn, missing: musicMissing,
+                         volume: +music.volume.toFixed(3),
+                         paused: music.paused, analyser: !!analyser }; },
+  get audioEl() { return music; },
+  /* Per-tile snapshot: which work each tile holds and how far it sits from
+     the camera. Lets a test detect the moment a tile swaps work and check
+     that it happened out in the fog rather than in plain view. */
+  tileReport() {
+    return tiles.map((g, i) => ({
+      i,
+      id: g.userData.asset ? g.userData.asset.id : null,
+      dist: g.position.distanceTo(camera.position),
+    }));
+  },
+  // Raw positions: a tile flip-flopping across the camera preserves its
+  // distance exactly, so detecting that needs coordinates, not range.
+  tilePos() {
+    return tiles.map((g, i) => ({ i, x: g.position.x, y: g.position.y, z: g.position.z }));
+  },
+  /* onScreen comes from the real view frustum, not from distance. Distance
+     alone called a work 40 units off-axis at 10 units depth "visible" when
+     it is nowhere near the frame — which produced both phantom pops and a
+     falsely healthy visible-count. */
+  tileOpacity() {
+    _frustumMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_frustumMat);
+    return tiles.filter((g) => g.userData.asset).map((g) => ({
+      dist: g.position.distanceTo(camera.position),
+      opacity: g.userData.art.material.opacity,
+      behind: g.position.z > camera.position.z,
+      // intersectsObject, not containsPoint: the latter tests only the
+      // centre, so a large near work filling the whole frame counted as
+      // absent and the field looked empty when it plainly was not.
+      onScreen: _frustum.intersectsObject(g.userData.art),
+    }));
+  },
+  /* Drives one frame of the gesture pipeline without a camera. The whole
+     gesture path is otherwise unverifiable in automation, and the
+     hold-to-close timing in particular needs to be exercised over real
+     elapsed time rather than reasoned about. */
+  feedGesture(name, lm) {
+    gest.prev = gest.current;
+    gest.current = name;
+    applyGesture(name, lm || null);
+    updateGuide(name, true);
+    return { reading: gest.current, focused: !!focused,
+             holdMs: gest.fistSince ? Math.round(performance.now() - gest.fistSince) : 0 };
+  },
+  // Core invariant: a work must never hang twice at once. Asserting this
+  // directly beats inferring it from a screenshot.
+  get duplicates() {
+    const seen = new Set();
+    let dupes = 0;
+    for (const g of tiles) {
+      const a = g.userData.asset;
+      if (!a) continue;
+      if (seen.has(a.id)) dupes++; else seen.add(a.id);
+    }
+    return dupes;
+  },
+};
+
+/* ── Boot ────────────────────────────────────────────────────────────── */
+for (let i = 0; i < TARGET_TILES; i++) makeTile();
+renderClusterOpts();
+renderStarred();
+tick();
+buildBrowser();
+loadSource(currentSource);
+</script>

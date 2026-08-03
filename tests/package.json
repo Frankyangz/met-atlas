@@ -1,0 +1,13 @@
+{
+  "name": "met-atlas-tests",
+  "private": true,
+  "type": "module",
+  "description": "Browser-automation and unit checks for Met Atlas. Serve the app first: npx serve .. -p 3002",
+  "scripts": {
+    "flight": "node flight-health.mjs",
+    "gestures": "node classify.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}
