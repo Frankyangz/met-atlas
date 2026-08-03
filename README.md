@@ -7,7 +7,13 @@ with your hands.
 
 **One HTML file. No framework, no build step, no dependencies to install.**
 
+### → [met-atlas.vercel.app](https://met-atlas.vercel.app)
+
 ![Met Atlas](docs/preview.png)
+
+> The Met rate-limits aggressively. If the canvas is slow to fill on a first
+> visit, that is the museum's WAF, not the app — see below for how it is
+> handled. A reload usually clears it.
 
 ---
 
