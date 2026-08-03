@@ -1105,47 +1105,113 @@ const FIELD_DEPTH   = 70;
    and at only 10 units they ended up ~8 units in FRONT of the viewer the
    moment the motion stopped — a 6-unit work at 8 units fills the entire
    frame. Anything parked here is behind the camera and therefore unseen. */
-const RECYCLE_AHEAD = 26;
-const ART_HEIGHT    = 6.0;
-
-/* Spread has to grow with distance. A fixed-radius column of tiles looks
-   sensible in plan view but renders as a tight knot in the middle of the
-   screen with empty margins all round, because perspective shrinks the
-   far end toward the vanishing point. Matching the spread to the view
-   frustum instead keeps works distributed evenly across the frame at
-   every depth. 0.52 ≈ tan(half of the 54° vertical FOV). */
-const FIELD_NEAR      = 7;
-const FRUSTUM_SPREAD  = 0.52;
-const reachAt = (z) => FIELD_NEAR + Math.abs(z - camera.position.z) * FRUSTUM_SPREAD;
-const TAN_HALF_FOV    = Math.tan((54 * Math.PI / 180) / 2);   // matches camera.fov
-
-/* How far out a work may drift before it is returned to the field. Fixed,
-   NOT derived from the frustum: a frustum-based bound shrinks as a work
-   approaches, which drags every incoming work onto the camera axis and
-   piles them up. Sized from the widest scatter() ever produces at the far
-   plane, so it only trips when the camera has actually panned away. */
-const MAX_SPREAD  = FIELD_NEAR + FIELD_DEPTH * FRUSTUM_SPREAD;   // ≈ 43.4
-const LATERAL_X   = MAX_SPREAD * 1.25 * 1.4;                     // ≈ 76
-const LATERAL_Y   = MAX_SPREAD * 0.72 * 1.4;                     // ≈ 44
+const TAN_HALF_FOV = Math.tan((54 * Math.PI / 180) / 2);   // matches camera.fov
 
 /* Works dissolve just before the camera would pass through them. A field
    thumb is 500px, so close up it is a blurry smear filling the frame —
    which is what you end up looking at, rather than the artwork. Fading
    them out reads as passing by instead of colliding.
+   The focused plane is exempt: the camera parks close to it deliberately. */
+const NEAR_FADE_START = 13;
+const NEAR_FADE_END   = 4;
 
-   A 6-unit work at 10 units away already spans ~59% of frame height and
-   only gets blurrier past that, so the dissolve starts there.
-   The focused tile is exempt: the camera parks close to it deliberately. */
-const NEAR_FADE_START = 10;
-const NEAR_FADE_END   = 3;
+/* How far a filtered-out work recedes. It is dimmed, never removed — a
+   narrow filter used to empty the canvas, which destroyed the sense of an
+   archive and made the filter less informative, not more. Leaving the
+   excluded works as a ghost layer keeps the field continuous and shows
+   matches in context. */
+const FILTER_DIM = 0.10;
 
-/* Nothing spawns closer than this. Without a floor, uniform depth puts a
-   few works a couple of units from the lens where a 4.6-unit painting
-   swallows the entire frame — one artwork, no field. At 16 units a work
-   reads as prominent (~28% of frame height) without dominating. */
-const MIN_DIST = 14;
-const randomDepth = () =>
-  camera.position.z - (MIN_DIST + Math.random() * (FIELD_DEPTH - MIN_DIST));
+/* ══════════════════════════════════════════════════════════════════════
+   The field is a chunked, deterministic world.
+
+   Space divides into cubes. A chunk's contents — how many works, where,
+   what size, which work — are a pure function of its coordinates, so a
+   work is CREATED and DESTROYED at chunk boundaries and never moved.
+
+   That one property is the point. The previous field recycled a fixed
+   pool of tiles to new positions around a moving camera, and essentially
+   every visual defect in this project came from it: works dragged onto
+   the camera axis into a pile, works flip-flopping across the frame,
+   works materialising in plain sight, the frame emptying while backing
+   up. None of those failure modes exist here, because nothing is ever
+   repositioned relative to the viewer.
+
+   27 chunks stay live (3×3 laterally × 3 deep, biased forward since the
+   camera faces −z). At 45 units they span 135³ — wide enough to cover the
+   frame out to the fog line, which is ~124 units across at 70 deep.
+   ══════════════════════════════════════════════════════════════════════ */
+const CHUNK_SIZE       = 45;
+/* Per CHUNK, so widening the neighbourhood must not come out of this.
+   Dropping it to 6 when the grid went from 27 to 45 chunks held the total
+   at 270 but cut density per unit volume by 40%, and coverage fell from
+   73% to 60% with holes reappearing. Density is the thing being fixed. */
+const PLANES_PER_CHUNK = 10;         // 27 × 10 = 270 planes (was 60)
+
+/* 3 × 3 × 3, biased forward since the camera faces −z.
+
+   Widening to five laterally was tried and reverted. It gave new chunks
+   more margin outside the frame, but spread the same planes through
+   volume that is mostly off-screen: measured coverage fell from 73% to
+   60–67% and holes returned. Emptiness is the defect being fixed, so
+   density wins. The residual effect — a chunk built during a hard
+   sideways pan appearing near the frame edge — is handled by fading a
+   plane in slowly rather than by moving the boundary. */
+const CHUNK_OFFSETS = [];
+for (let dx = -1; dx <= 1; dx++)
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dz = -2; dz <= 0; dz++) CHUNK_OFFSETS.push([dx, dy, dz]);
+
+/* Works vary in size rather than all being 6.0 units. Uniform sizing reads
+   as a chart; a range gives the field rhythm and lets near works overlap
+   into layers. 7–14 here matches the apparent size of visual-atlas's 11–20
+   once the different FOV is accounted for (54° vs 72°). */
+const ART_MIN_H = 7;
+const ART_MAX_H = 14;
+
+const hash3 = (x, y, z) => {
+  let h = 0x811c9dc5;
+  for (const v of [x, y, z]) h = Math.imul(h ^ (v + 0x9e3779b9), 0x01000193);
+  return h >>> 0;
+};
+const srand = (seed) => {
+  const s = Math.sin(seed * 12.9898 + 1.0) * 43758.5453;
+  return s - Math.floor(s);
+};
+const mod = (n, m) => ((n % m) + m) % m;
+
+/* A chunk's layout, derived purely from its coordinates. Revisiting the
+   same coordinates reproduces it exactly, so flying away and back shows
+   the same works in the same places. */
+function chunkPlanes(cx, cy, cz) {
+  const seed = hash3(cx, cy, cz);
+  // Spatially sequential, so neighbouring slots take consecutive works and
+  // never collide. Copies of one work end up a whole pool-length apart.
+  const seq = cx + cy * 3 + cz * 9;
+  const out = [];
+  for (let i = 0; i < PLANES_PER_CHUNK; i++) {
+    const b = seed + i * 1013;
+    const r = (n) => srand(b + n);
+
+    /* Stratified, not uniform-random. Scattering N points independently in
+       a cube is a Poisson process: it clumps and leaves voids, which is
+       exactly the empty region that prompted this. Walking the eight
+       octants in turn and jittering within each spreads planes evenly
+       while keeping the layout deterministic. */
+    const oct = i % 8;
+    const ox = oct & 1, oy = (oct >> 1) & 1, oz = (oct >> 2) & 1;
+    const cell = (base, jitter) => (base + jitter * 0.92 + 0.04) / 2;
+
+    out.push({
+      x: (cx + cell(ox, r(0))) * CHUNK_SIZE,
+      y: (cy + cell(oy, r(1))) * CHUNK_SIZE,
+      z: (cz + cell(oz, r(2))) * CHUNK_SIZE,
+      h: ART_MIN_H + r(3) * (ART_MAX_H - ART_MIN_H),
+      slot: seq * PLANES_PER_CHUNK + i,
+    });
+  }
+  return out;
+}
 
 const texLoader = new THREE.TextureLoader();
 texLoader.setCrossOrigin('anonymous');
@@ -1171,12 +1237,12 @@ function makeTile() {
   }));
 
   group.add(mount, art);
-  // fade = the tile's own load/retire opacity; dim = how far it recedes
-  // when another work is focused. Kept separate so a tile fading in while
-  // dimmed resolves to the right value instead of fighting itself.
+  group.visible = false;
+  // fade = the plane's own load opacity; dim = how far it recedes when
+  // another work is focused or a filter excludes it. Kept separate so a
+  // plane fading in while dimmed resolves correctly instead of fighting.
   group.userData = { asset: null, loaded: false, target: 0, fade: 0, dim: 1,
-                     retiring: false, hiResFor: null, art, mount };
-  scatter(group, randomDepth());
+                     hiResFor: null, baseH: ART_MIN_H, passes: true, art, mount };
   scene.add(group);
   tiles.push(group);
   artMeshes.push(art);
@@ -1184,151 +1250,214 @@ function makeTile() {
   return group;
 }
 
-/* Scatter around the camera's current x/y, never the world origin — the
-   field must stay wrapped around the viewer or panning far in one
-   direction flies out of the slab into empty space. */
-/* spreadZ lets a caller size the lateral spread for a depth other than the
-   one the work is being placed at. Rebirths behind the camera need this:
-   sized at their birth distance (8 units) they land in a tight column and
-   stay clustered on the axis once they come into view. */
-function scatter(group, z, spreadZ = z) {
-  const r = reachAt(spreadZ) * Math.sqrt(Math.random());
-  const a = Math.random() * Math.PI * 2;
-  group.position.set(
-    camera.position.x + Math.cos(a) * r * 1.05,   // wider than tall, like the viewport
-    camera.position.y + Math.sin(a) * r * 0.60,
-    z,
-  );
+/* ── Chunk lifecycle ─────────────────────────────────────────────────
+   Planes are drawn from a free pool as chunks come into range and handed
+   back when they leave. Chunks only change when the camera crosses a
+   45-unit boundary, so this runs rarely — not per frame. */
+const activeChunks = new Map();       // "cx,cy,cz" -> [plane groups]
+const freeTiles = [];
+
+function takeTile() {
+  const g = freeTiles.pop() || makeTile();
+  g.visible = true;
+  return g;
 }
 
-function releaseTexture(group) {
-  const m = group.userData.art.material;
-  if (m.map) { m.map.dispose(); m.map = null; }
+function giveBackTile(g) {
+  const u = g.userData;
+  if (u.asset) releaseTextureFor(u.asset.id);
+  u.asset = null; u.loaded = false; u.fade = 0; u.target = 0; u.hiResFor = null;
+  u.art.material.map = null;
+  u.art.material.opacity = 0;
+  u.mount.material.opacity = 0;
+  g.visible = false;
+  freeTiles.push(g);
 }
 
-/* Which works are on screen right now. A filter narrowing to five works
-   must show five works — wrapping them across 88 tiles fills the frame
-   with the same vase six times, which reads as a rendering bug rather
-   than a small result. So a work is never on the wall twice at once;
-   surplus tiles park themselves instead. */
-const inUse = new Set();
-
-function releaseAsset(group) {
-  const a = group.userData.asset;
-  if (a) inUse.delete(a.id);
-  group.userData.asset = null;
-}
-
-/* Next work not already hanging. Returns null when the whole filtered
-   set is on screen — the caller parks the tile. */
-function nextAsset() {
-  for (let i = 0; i < visible.length; i++) {
-    const a = visible[(cursor + i) % visible.length];
-    if (!inUse.has(a.id)) { cursor = (cursor + i + 1) % visible.length; return a; }
-  }
-  return null;
-}
-
-/* Retire a tile from the field. The texture is deliberately NOT disposed
-   here: the tile is still on screen at full opacity and easing out, and
-   dropping its map mid-fade leaves a blank white plane hanging in the
-   field — the ghost rectangles a narrowing filter used to scatter
-   everywhere. The work is released for reuse immediately; the texture is
-   freed in the loop once it has actually faded. */
-function park(group) {
-  const u = group.userData;
-  if (u.asset) inUse.delete(u.asset.id);
-  u.asset = null;
+/* Bind a work to a plane. The plane's own height comes from the chunk
+   layout; only the aspect waits on the image, so a plane is correctly
+   sized and positioned before its texture arrives. */
+function dressTile(g, spec, asset) {
+  const u = g.userData;
+  g.position.set(spec.x, spec.y, spec.z);
+  u.baseH = spec.h;
+  u.asset = asset;
   u.loaded = false;
-  u.target = 0;
-  u.retiring = true;
-}
-
-function assign(group, asset) {
-  const u = group.userData;
-  if (u.asset) inUse.delete(u.asset.id);
-  u.asset = asset; u.loaded = false; u.target = 0;
-  u.retiring = false;
   u.fade = 0;
-  u.hiResFor = null;              // new work — any hi-res swap is stale
-  inUse.add(asset.id);
-  releaseTexture(group);
+  u.target = 0;
+  u.hiResFor = null;
+  u.passes = passes(asset);
+  u.art.material.map = null;
   u.art.material.color.setHex(0xEAE4D8);
   u.art.material.opacity = 0;
   u.mount.material.opacity = 0;
   u.art.material.needsUpdate = true;
-  u.art.scale.set(3.6, 3.6, 1);
-  u.mount.scale.set(3.9, 3.9, 1);
-  enqueueTexture(group, asset);
+  sizeTile(g, asset.aspect || 1);
+
+  acquireTexture(asset, (tex) => {
+    if (u.asset !== asset) { releaseTextureFor(asset.id); return; }   // chunk moved on
+    u.art.material.map = tex;
+    u.art.material.color.setHex(0xFFFFFF);
+    u.art.material.needsUpdate = true;
+    sizeTile(g, asset.aspect || 1);
+    u.loaded = true;
+    u.target = 1;
+  }, () => {
+    if (u.asset !== asset) return;
+    u.target = 0.16;                 // faint placeholder beats a hole in the field
+  });
 }
 
-/* ── Texture queue ───────────────────────────────────────────────────
-   Every image goes through one proxy host and browsers cap connections
-   per host at ~6. Firing 88 loads at once therefore parallelises nothing;
-   it builds an invisible queue we cannot prioritise while the proxy
-   degrades under the pile-up. So we own the queue: bounded concurrency,
-   nearest tile first, because what the viewer is flying toward matters. */
-const texQueue = [];
-let inflight = 0;
-const imgStats = { loaded: 0, failed: 0 };
+function sizeTile(g, aspect) {
+  const h = g.userData.baseH, w = h * aspect;
+  g.userData.art.scale.set(w, h, 1);
+  g.userData.mount.scale.set(w + h * 0.045, h * 1.045, 1);
+}
 
-function enqueueTexture(group, asset) { texQueue.push({ group, asset }); pumpQueue(); }
+const chunkKey = (cx, cy, cz) => `${cx},${cy},${cz}`;
 
-function pumpQueue() {
-  while (inflight < MAX_INFLIGHT && texQueue.length) {
-    let best = -1, bestDist = Infinity;
-    for (let i = texQueue.length - 1; i >= 0; i--) {
-      const job = texQueue[i];
-      if (job.group.userData.asset !== job.asset) { texQueue.splice(i, 1); continue; }
-      const d = Math.abs(job.group.position.z - camera.position.z);
-      if (d < bestDist) { bestDist = d; best = i; }
-    }
-    if (best < 0) return;
-    const job = texQueue.splice(best, 1)[0];
-    inflight++;
-    loadTexture(job.group, job.asset);
+function buildChunk(cx, cy, cz) {
+  const key = chunkKey(cx, cy, cz);
+  if (activeChunks.has(key) || !assets.length) return;
+  const group = [];
+  for (const spec of chunkPlanes(cx, cy, cz)) {
+    const g = takeTile();
+    // Sequential slot → consecutive works for neighbouring planes, so two
+    // copies of one work are a whole pool apart rather than side by side.
+    dressTile(g, spec, assets[mod(spec.slot, assets.length)]);
+    group.push(g);
   }
+  activeChunks.set(key, group);
 }
 
-function loadTexture(group, asset) {
-  const done = () => { inflight--; pumpQueue(); };
+function dropChunk(key) {
+  const group = activeChunks.get(key);
+  if (!group) return;
+  group.forEach(giveBackTile);
+  activeChunks.delete(key);
+  evictTextures();
+}
+
+/* Called every frame but almost always a no-op — the early return fires
+   unless the camera has actually crossed into a new chunk. */
+let lastChunk = null;
+function updateChunks(force = false) {
+  if (clusterBy) return;                       // cluster mode owns positions
+  /* floor, not round. Planes occupy [cz·45, (cz+1)·45], so the chunk
+     CONTAINING a point is its floor. Rounding put the camera in a chunk
+     whose volume it was not inside — at z=30 it claimed chunk 1, which
+     spans 45–90 — shifting the whole loaded neighbourhood half a chunk
+     and letting newly-built chunks intrude into the frame. */
+  const cx = Math.floor(camera.position.x / CHUNK_SIZE);
+  const cy = Math.floor(camera.position.y / CHUNK_SIZE);
+  const cz = Math.floor(camera.position.z / CHUNK_SIZE);
+  const here = chunkKey(cx, cy, cz);
+  if (!force && here === lastChunk) return;
+  lastChunk = here;
+
+  const want = new Set();
+  for (const [dx, dy, dz] of CHUNK_OFFSETS) {
+    const k = chunkKey(cx + dx, cy + dy, cz + dz);
+    want.add(k);
+    buildChunk(cx + dx, cy + dy, cz + dz);
+  }
+  for (const k of [...activeChunks.keys()]) if (!want.has(k)) dropChunk(k);
+}
+
+// A new collection invalidates every chunk's asset binding.
+function rebuildField() {
+  for (const k of [...activeChunks.keys()]) dropChunk(k);
+  lastChunk = null;
+  updateChunks(true);
+}
+
+/* ── Shared texture cache ────────────────────────────────────────────
+   Keyed by asset id and reference-counted, so many planes showing the
+   same work share one GPU texture.
+
+   This is what makes a 162-plane field affordable at all: with one
+   texture per plane, 162 images at 500px would be roughly 160 MB of GPU
+   memory. Shared, the cost is bounded by the number of distinct works
+   loaded (~45) no matter how many planes display them.
+
+   Reference counting matters because a chunk being destroyed must not
+   dispose a texture that a plane in another chunk is still using. Entries
+   drop to zero refs and linger for reuse; only then are they evictable. */
+const MAX_TEX = 90;
+const texCache = new Map();   // assetId -> { tex, refs, waiters }
+
+function acquireTexture(asset, onReady, onFail) {
+  const key = String(asset.id);
+  const hit = texCache.get(key);
+
+  if (hit) {
+    hit.refs++;
+    texCache.delete(key); texCache.set(key, hit);      // LRU touch
+    if (hit.tex) onReady(hit.tex);
+    else hit.waiters.push({ onReady, onFail });         // still in flight
+    return;
+  }
+
+  const entry = { tex: null, refs: 1, waiters: [{ onReady, onFail }] };
+  texCache.set(key, entry);
+
   texLoader.load(
     proxied(asset.thumb, THUMB_W),
     (tex) => {
-      done();
-      if (group.userData.asset !== asset) { tex.dispose(); return; }
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.generateMipmaps = true;
       tex.minFilter = THREE.LinearMipmapLinearFilter;
       tex.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+      entry.tex = tex;
 
       const img = tex.image;
-      const aspect = (img && img.width && img.height) ? img.width / img.height : 1;
-      const h = ART_HEIGHT, w = h * aspect;
-      const u = group.userData;
-      u.art.scale.set(w, h, 1);
-      u.mount.scale.set(w + 0.26, h + 0.26, 1);
-      u.art.material.map = tex;
-      u.art.material.color.setHex(0xFFFFFF);
-      u.art.material.needsUpdate = true;
-      u.loaded = true;
-      u.target = 1;
-
-      asset.aspect = aspect;
+      asset.aspect = (img && img.width && img.height) ? img.width / img.height : 1;
       if (!asset.colour) asset.colour = sampleColour(img);   // feeds the colour filter
+
       imgStats.loaded++;
+      entry.waiters.forEach((w) => w.onReady(tex));
+      entry.waiters.length = 0;
       refreshStatus();
+      evictTextures();
     },
     undefined,
     () => {
-      done();
-      if (group.userData.asset !== asset) return;
-      group.userData.target = 0.16;     // faint placeholder beats a hole in the field
       imgStats.failed++;
+      entry.waiters.forEach((w) => w.onFail && w.onFail());
+      entry.waiters.length = 0;
+      texCache.delete(key);          // let a later plane retry it
       refreshStatus();
     },
   );
 }
+
+function releaseTextureFor(assetId) {
+  const e = texCache.get(String(assetId));
+  if (e && e.refs > 0) e.refs--;
+}
+
+// Only unreferenced entries are evictable — disposing a texture still bound
+// to a live plane leaves a blank white rectangle in the field.
+function evictTextures() {
+  if (texCache.size <= MAX_TEX) return;
+  for (const [k, e] of texCache) {
+    if (texCache.size <= MAX_TEX) break;
+    if (e.refs === 0 && e.tex) { e.tex.dispose(); texCache.delete(k); }
+  }
+}
+
+/* Load counters. The bounded texture queue that used to live here is
+   gone: the shared cache is now the only place a texture is requested,
+   and it already collapses concurrent requests for the same work into a
+   single fetch, which is what the queue was mostly achieving. */
+const imgStats = { loaded: 0, failed: 0 };
+
+// Cache entries with no texture yet — images still in flight.
+const texPending = () => {
+  let n = 0;
+  for (const e of texCache.values()) if (!e.tex) n++;
+  return n;
+};
 
 /* The Met supplies no colour data, so it is derived here. This is only
    possible because the proxy re-serves images CORS-clean — a tainted
@@ -1412,7 +1541,7 @@ function refreshStatus() {
   }
   if (loadState.phase === 'done') {
     if (!loadState.found) { status('Nothing found — try another search.', { spin: false }); return; }
-    if (inflight + texQueue.length > 0) {
+    if (texPending() > 0) {
       // Clamped: imgStats.loaded counts texture loads, which recycling can
       // push past the number of works. "780 of 40" is not a status.
       status(`Hanging the last works — ${Math.min(imgStats.loaded, loadState.found)} of ${loadState.found}`);
@@ -1420,7 +1549,7 @@ function refreshStatus() {
     }
     const fail = imgStats.failed ? ` · ${imgStats.failed} image${imgStats.failed > 1 ? 's' : ''} unavailable` : '';
     status(`${loadState.found} works${fail}`, { spin: false });
-    setTimeout(() => { if (loadState.phase === 'done' && !texQueue.length) status(null); }, 2600);
+    setTimeout(() => { if (loadState.phase === 'done' && !texPending()) status(null); }, 2600);
   }
 }
 
@@ -1455,10 +1584,11 @@ function applyFilters({ repopulate = true } = {}) {
     `${visible.length} of ${assets.length} works shown`;
   document.getElementById('f-count-cluster').textContent =
     clusterBy ? `${visible.length} works grouped` : `${visible.length} works in the field`;
-  if (repopulate) repopulateField();
+  markFilterPasses();
   if (clusterBy) layoutClusters();
 
-  // An empty field with no explanation reads as a crash. Say it plainly.
+  // Say it plainly. The field no longer goes blank — excluded works stay
+  // as a ghost layer — but "nothing matched" still needs stating.
   if (assets.length && !visible.length) {
     loadState.phase = 'error';
     loadState.message = 'No works match these filters.';
@@ -1477,45 +1607,30 @@ function applyFiltersDebounced() {
   filterTimer = setTimeout(() => applyFilters(), 160);
 }
 
-/* Rebuild tile→asset mapping against the filtered set. Tiles beyond the
-   set wrap rather than sit empty: a narrow filter leaving 80% of the
-   field blank reads as breakage, repeats read as a small collection.
+/* Filtering no longer moves or reassigns anything — it just marks which
+   planes pass, and the render loop dims the rest to a ghost layer.
 
-   Crucially this preserves tiles whose work still passes. Reassigning
-   every tile on every filter change would re-download 88 textures per
-   keystroke of the date slider — the exact proxy stampede the queue
-   exists to prevent. */
-function repopulateField() {
-  const keep = new Set(visible.map((a) => a.id));
-
-  // Drop anything the filter excluded. Tiles whose work survived keep
-  // their texture — reassigning every tile on every filter change would
-  // re-download 88 images per slider tick.
+   The old version reassigned every tile so only matching works were on
+   screen, which emptied the canvas whenever a filter was narrow and
+   destroyed the sense of an archive. Dimming keeps the field continuous
+   and makes the filter more legible, because you see the matches against
+   everything else rather than floating alone. It is also far cheaper:
+   nothing re-downloads on a slider drag. */
+function markFilterPasses() {
   for (const g of tiles) {
-    const a = g.userData.asset;
-    if (a && !keep.has(a.id)) park(g);
-  }
-  fillEmptyTiles();
-}
-
-/* Hand every empty tile a work that isn't already hanging; park whatever
-   is left over. This is what makes "5 of 21 works shown" display exactly
-   five works. */
-function fillEmptyTiles() {
-  for (const g of tiles) {
-    if (g.userData.asset) continue;
-    const a = nextAsset();
-    if (a) assign(g, a); else park(g);
+    if (g.userData.asset) g.userData.passes = passes(g.userData.asset);
   }
 }
 
 function feed(records) {
   assets.push(...records);
   visible = assets.filter(passes);
-  fillEmptyTiles();
+  // First works to arrive populate the field; later batches widen the pool
+  // that chunks draw from, so the field is rebuilt against the new set.
+  rebuildField();
 }
 
-function topUp() { fillEmptyTiles(); }
+function topUp() { rebuildField(); }
 
 /* Replay the last good visit. Returns false if there is nothing stored,
    so callers can fall through to the error message. */
@@ -1547,27 +1662,20 @@ async function loadSource(source) {
     source.kind === 'search' ? `Search — “${source.query}”` : source.label;
 
   assets = []; visible = []; cursor = 0;
-  inUse.clear();
   imgStats.loaded = 0; imgStats.failed = 0;
-  texQueue.length = 0;
   filters.colours.clear(); filters.keywords.clear();
   filters.yearMin = filters.yearMax = null;
   clusterBy = null;
   renderClusterOpts();
 
-  for (const g of tiles) {
-    g.userData.asset = null; g.userData.loaded = false;
-    g.userData.target = 0; g.userData.fade = 0; g.userData.hiResFor = null;
-    // Clearing the cluster goal matters: without it, tiles keep easing
-    // toward stations computed for the *previous* collection and the new
-    // one loads into a frozen, still-clustered field.
-    g.userData.goal = null;
-    releaseTexture(g);
-    g.userData.art.material.color.setHex(0xEAE4D8);
-    g.userData.art.material.opacity = 0;
-    g.userData.mount.material.opacity = 0;
-    scatter(g, randomDepth());
-  }
+  // Clearing cluster goals matters: without it, planes keep easing toward
+  // stations computed for the *previous* collection and the new one loads
+  // into a frozen, still-clustered field.
+  for (const g of tiles) g.userData.goal = null;
+  // Hands every plane back and empties the chunk map; the next load's first
+  // batch rebuilds it.
+  for (const k of [...activeChunks.keys()]) dropChunk(k);
+  lastChunk = null;
 
   loadState.phase = 'ids'; loadState.found = 0;
   refreshStatus();
@@ -1817,7 +1925,10 @@ function layoutClusters() {
 }
 
 function scatterField() {
-  for (const g of tiles) { g.userData.goal = null; scatter(g, randomDepth()); }
+  // Leaving cluster mode: drop the stations and let the chunked field
+  // reassert itself from the camera's current position.
+  for (const g of tiles) g.userData.goal = null;
+  rebuildField();
   applyFilters({ repopulate: false });
 }
 
@@ -2204,13 +2315,21 @@ document.getElementById('focus-star').addEventListener('click', () => {
    placed ahead of the camera, so the flight still reads as travel rather
    than a jump cut. */
 function summon(asset) {
-  let tile = tiles.find((g) => g.userData.asset && String(g.userData.asset.id) === String(asset.id));
+  const live = tiles.filter((g) => g.visible && g.userData.asset);
+  let tile = live.find((g) => String(g.userData.asset.id) === String(asset.id));
+
   if (!tile) {
-    tile = tiles.find((g) => !g.userData.asset) || tiles.reduce((far, g) =>
-      Math.abs(g.position.z - camera.position.z) > Math.abs(far.position.z - camera.position.z) ? g : far, tiles[0]);
+    /* Not currently in the field. Commandeer the most distant live plane
+       and place it ahead of the camera. It reverts on the next chunk
+       rebuild, which is fine — by then you have already flown to it. */
+    tile = live.reduce((far, g) =>
+      Math.abs(g.position.z - camera.position.z) > Math.abs(far.position.z - camera.position.z) ? g : far,
+      live[0]);
+    if (!tile) return;
     tile.position.set(camera.position.x + 2, camera.position.y, camera.position.z - 30);
     tile.userData.goal = null;
-    assign(tile, asset);
+    dressTile(tile, { x: tile.position.x, y: tile.position.y, z: tile.position.z,
+                      h: tile.userData.baseH, slot: 0 }, asset);
   }
   togglePanel('bookmarks', false);
   openFocus(asset, tile);
@@ -2398,137 +2517,33 @@ function tick(now) {
 
   // Recycling frees the tile's work first, so it can be re-drawn if the
   // filtered set is small — but never alongside a copy of itself.
-  /* Works are only ever born at the far plane, deep inside the fog, so
-     they emerge from the haze and travel toward you. Reborn any nearer
-     and a work materialises mid-air at full size and full opacity — the
-     "popping up in your face" that a random birth depth produces. The
-     small jitter stops every rebirth landing on one flat plane. */
-  // Right at the back plane, where the fog is total. The jitter only stops
-  // every rebirth landing on one flat sheet.
-  const birthDepth = () => camera.position.z - (FIELD_DEPTH - Math.random() * 2);
-
-  const rehome = (g) => {              // fresh work for a tile already moved
-    const prev = g.userData.asset;
-    releaseAsset(g);
-    const a = nextAsset() || prev;
-    if (!a) { park(g); return; }
-
-    /* When the same work comes back to this tile — which is the common
-       case, since releasing it immediately makes it the next available
-       one — keep the texture it already has.
-
-       assign() unconditionally disposes and re-queues, so without this
-       every recycle re-downloaded an image we were already holding. At
-       flying speed the whole field recycles every couple of seconds, which
-       swamped the 5-slot texture queue and left the canvas completely
-       blank while moving. */
-    if (a === prev && g.userData.loaded) {
-      g.userData.asset = a;
-      inUse.add(a.id);
-      g.userData.target = 1;
-      return;
-    }
-    assign(g, a);
-  };
-
-  const recycle = (g, z, spreadZ) => { scatter(g, z, spreadZ); rehome(g); };
+  /* Chunks in and out of range. Nothing here repositions a work — that is
+     the entire reason the pile, the flicker, the pop-in and the panning
+     artefact are gone. Almost always a no-op: it returns immediately
+     unless the camera has crossed a chunk boundary. */
+  updateChunks();
 
   for (const g of tiles) {
+    if (!g.visible) continue;
     const u = g.userData;
 
-    if (g === focusTile) {
-      // Frozen: neither recycled nor moved. Recycling would swap the
-      // artwork mid-approach so you land on something you never clicked;
-      // easing toward a cluster station would slide the work you are
-      // reading out of frame while you read it.
-    } else if (u.goal) {
-      // Clustered: ease toward the assigned station instead of recycling.
-      g.position.lerp(u.goal, 0.055);
-    } else {
-      // Flown past — send it back out to the far plane to approach again.
-      if (g.position.z > camera.position.z + RECYCLE_AHEAD) {
-        recycle(g, birthDepth());
+    // Cluster mode is the one thing that does move planes, and it owns
+    // them completely while active — updateChunks() stands down for it.
+    if (u.goal && g !== focusTile) g.position.lerp(u.goal, 0.055);
 
-      /* Retreating: the work has fallen out the back. Put it BEHIND the
-         viewer so it re-enters the near field as they keep backing away.
+    // 0.035, roughly a two-second dissolve. A plane built during a hard
+    // sideways pan can appear near the frame edge; fading it in slowly is
+    // what turns that from a pop into an arrival.
+    u.fade += (u.target - u.fade) * 0.035;
 
-         Rebirthing it at the far plane instead — which is what the previous
-         version did — leaves every work oscillating in the 70–89u band,
-         which the fog renders 100% faded. Measured: after ten seconds of
-         backing up, all 48 works sat beyond 70u and the frame was empty.
-
-         This is only safe because of the near-approach dissolve: a work
-         emerging from behind the camera is invisible until 3 units out.
-
-         Placed just INSIDE the "flown past" threshold above, not beyond it.
-         At +14 the first branch reclaimed the work on the very next frame
-         and threw it to the far plane — an endless back/far churn measured
-         at 2.4 re-placements per second with nothing ever settling. */
-      } else if (g.position.z < camera.position.z - FIELD_DEPTH - RECYCLE_AHEAD) {
-        // Spread sized for ~30 units — where these will actually be looked
-        // at — rather than the 8 units they are born at, which would stack
-        // them in a narrow column on the axis.
-        recycle(g, camera.position.z + RECYCLE_AHEAD - 6, camera.position.z - 30);
-
-      } else {
-        /* Lateral bound — without it, panning far walks the camera clean
-           out of the slab into empty space.
-
-           DEPTH-INDEPENDENT, and this is the whole point. Deriving the
-           bound from the view frustum meant it shrank as a work approached
-           while the work's offset stayed put, so every approaching work was
-           repeatedly dragged toward the camera axis. Measured: mean lateral
-           offset fell from 19.7 at 40u to 2.9 at 0–9u — a sevenfold
-           collapse, and the pile on screen.
-
-           Constants derived from the widest a work is ever born (scatter()
-           at the far plane), so this now trips only when the camera has
-           genuinely panned away from the field — never because a work is
-           passing close by.
-
-           The work wraps to the opposite side at the SAME depth, at 0.9 of
-           the bound so it lands strictly inside and cannot flip-flop (the
-           earlier flicker was mirroring to the same |x|, which stayed out
-           of bounds). Sending it to the far plane instead does not work:
-           panning never changes z, so the work would sit at 70u in total
-           fog forever and the field would simply empty out — measured, it
-           did exactly that. At 0.9 × 76 it is off-screen at every depth and
-           slides into view only if the pan continues. */
-        const dx = g.position.x - camera.position.x;
-        const dy = g.position.y - camera.position.y;
-        if (Math.abs(dx) > LATERAL_X || Math.abs(dy) > LATERAL_Y) {
-          /* Fixed TRIGGER, frustum-based RE-ENTRY. The trigger must not
-             depend on depth — that was the pile. But where a work re-enters
-             should: at 20 units the frame is only ~18 wide, so dropping it
-             back at 60 leaves it invisible for the rest of the pan, and the
-             field reads as empty. Coming back just outside the frame at its
-             own depth means it slides into view almost immediately.
-
-             Randomised, because landing every work at the same offset made
-             them cross in as one rank with a gap behind. Capped below the
-             trigger so it can never immediately re-fire. */
-          const halfH = Math.max(1, Math.abs(g.position.z - camera.position.z)) * TAN_HALF_FOV;
-          const halfW = halfH * camera.aspect;
-          /* Floored at 18. A work sitting near the camera's own z-plane has
-             dz ≈ 0, so its frustum half-width is ≈ 0 and an unfloored edge
-             put it barely a unit from the lens — filling the frame
-             instantly. The floor keeps every re-entry outside the frame at
-             every depth. */
-          const edge = (half, bound) =>
-            Math.min(Math.max(half * (1.15 + Math.random() * 0.35), 18), bound * 0.95);
-          if (Math.abs(dx) > LATERAL_X) g.position.x = camera.position.x - Math.sign(dx) * edge(halfW, LATERAL_X);
-          if (Math.abs(dy) > LATERAL_Y) g.position.y = camera.position.y - Math.sign(dy) * edge(halfH, LATERAL_Y);
-          rehome(g);
-        }
-      }
+    /* Two independent reasons a work recedes, multiplied rather than
+       branched: another work is focused, or a filter excludes this one.
+       The focused plane is exempt from both. */
+    let wantDim = 1;
+    if (g !== focusTile) {
+      if (focused) wantDim *= 0.17;
+      if (!u.passes) wantDim *= FILTER_DIM;
     }
-
-    u.fade += (u.target - u.fade) * 0.07;
-
-    // Dimming happens here, in the scene, rather than as a DOM veil — the
-    // focused work has to stay bright while everything else recedes, and
-    // a screen-wide overlay would dim them both equally.
-    const wantDim = (focused && g !== focusTile) ? 0.17 : 1;
     u.dim += (wantDim - u.dim) * 0.07;
 
     // Dissolve on close approach so you pass through a work rather than
@@ -2546,8 +2561,17 @@ function tick(now) {
     u.art.material.opacity = o;
     u.mount.material.opacity = o * 0.5;
 
-    // Safe to free now — the tile has actually left the screen.
-    if (u.retiring && u.fade < 0.02) { releaseTexture(g); u.retiring = false; }
+    /* Stop drawing what contributes nothing. Transparent planes cannot use
+       early-z, so every fragment of every one is shaded and blended: with
+       270 large overlapping planes the overdraw halved the frame rate
+       (22 → 11 fps measured) even though draw calls barely moved.
+
+       Skipping the invisible ones costs a boolean and recovers most of it.
+       The mount board goes earlier than the artwork — it is a subtle
+       shadow that nobody can see behind a mostly-faded work, and it is
+       half the transparent fill in the scene. */
+    u.art.visible = o > 0.02;
+    u.mount.visible = o > 0.22;
   }
 
   renderer.render(scene, camera);
@@ -3103,7 +3127,36 @@ window.__atlas = {
   get camera()  { return camera.position.clone(); },
   get focused() { return focused ? focused.title : null; },
   get flying()  { return !!flight; },
-  get pending() { return texQueue.length + inflight; },
+  get pending() { return texPending(); },
+  get chunks()  { return { active: activeChunks.size, planes: tiles.filter((g) => g.visible).length,
+                           pooled: freeTiles.length, textures: texCache.size }; },
+  /* Each live plane projected to a screen-space box in 0..1, with the
+     opacity and distance needed to judge whether it is actually seen.
+     Lets a test measure frame coverage without reading WebGL pixels,
+     which a 2D drawImage cannot do without preserveDrawingBuffer. */
+  planeQuads() {
+    camera.updateMatrixWorld();
+    const v = new THREE.Vector3();
+    const out = [];
+    for (const g of tiles) {
+      if (!g.visible || !g.userData.asset) continue;
+      const s = g.userData.art.scale;
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const [sx, sy] of [[-0.5, -0.5], [0.5, -0.5], [-0.5, 0.5], [0.5, 0.5]]) {
+        v.set(g.position.x + sx * s.x, g.position.y + sy * s.y, g.position.z);
+        v.project(camera);
+        const px = (v.x + 1) / 2, py = (1 - v.y) / 2;
+        x0 = Math.min(x0, px); x1 = Math.max(x1, px);
+        y0 = Math.min(y0, py); y1 = Math.max(y1, py);
+      }
+      out.push({ x0, x1, y0, y1,
+                 opacity: g.userData.art.material.opacity,
+                 dist: g.position.distanceTo(camera.position),
+                 behind: g.position.z > camera.position.z,
+                 id: g.userData.asset.id });
+    }
+    return out.filter((p) => !p.behind);
+  },
   get counts()  { return { assets: assets.length, visible: visible.length, starred: starOrder().length }; },
   get onWall()  { return tiles.filter((g) => g.userData.asset).length; },
   get flySpeed() { return nav.vz; },        // must never exceed MAX_FLY
@@ -3129,10 +3182,20 @@ window.__atlas = {
       dist: g.position.distanceTo(camera.position),
     }));
   },
-  // Raw positions: a tile flip-flopping across the camera preserves its
-  // distance exactly, so detecting that needs coordinates, not range.
+  /* One aligned row per plane — position AND appearance together.
+     Previously position and opacity came from two calls with different
+     filters, so index i referred to different planes in each and a test
+     read one plane's position against another's opacity. */
   tilePos() {
-    return tiles.map((g, i) => ({ i, x: g.position.x, y: g.position.y, z: g.position.z }));
+    _frustumMat.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_frustumMat);
+    return tiles.map((g, i) => ({
+      i, x: g.position.x, y: g.position.y, z: g.position.z,
+      live: g.visible && !!g.userData.asset,
+      id: g.userData.asset ? g.userData.asset.id : null,
+      opacity: g.userData.art.material.opacity,
+      onScreen: g.visible && _frustum.intersectsObject(g.userData.art),
+    }));
   },
   /* onScreen comes from the real view frustum, not from distance. Distance
      alone called a work 40 units off-axis at 10 units depth "visible" when
@@ -3178,7 +3241,9 @@ window.__atlas = {
 };
 
 /* ── Boot ────────────────────────────────────────────────────────────── */
-for (let i = 0; i < TARGET_TILES; i++) makeTile();
+// Pre-allocate the plane pool so the first chunk build has no hitch.
+// 27 live chunks × 6 planes is the steady-state ceiling.
+for (let i = 0; i < CHUNK_OFFSETS.length * PLANES_PER_CHUNK; i++) freeTiles.push(makeTile());
 renderClusterOpts();
 renderStarred();
 tick();
