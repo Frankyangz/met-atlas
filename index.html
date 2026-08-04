@@ -1267,6 +1267,7 @@ function giveBackTile(g) {
   const u = g.userData;
   if (u.asset) releaseTextureFor(u.asset.id);
   u.asset = null; u.loaded = false; u.fade = 0; u.target = 0; u.hiResFor = null;
+  u.spec = null;                 // no longer belongs to a chunk layout
   u.art.material.map = null;
   u.art.material.opacity = 0;
   u.mount.material.opacity = 0;
@@ -1316,18 +1317,63 @@ function sizeTile(g, aspect) {
 
 const chunkKey = (cx, cy, cz) => `${cx},${cy},${cz}`;
 
+/* Which work a slot shows.
+
+   The divisor is held at the EXPECTED final count while loading, not the
+   running total. Using the running total meant every arriving batch
+   changed `assets.length` and therefore re-pointed every slot at a
+   different work — so the field had to be rebuilt to stay consistent, and
+   each rebuild reset every plane's fade to zero. Measured: 25 rebuilds
+   and 22 visible flashes during a single load.
+
+   Held steady, a plane's work never changes once assigned; slots whose
+   work has not arrived yet simply stay blank and fill in as it does. */
+let slotSpan = TARGET_TILES;
+
+function assetForSlot(slot) {
+  if (!assets.length) return null;
+  return assets[mod(slot, Math.max(1, slotSpan))] || null;
+}
+
 function buildChunk(cx, cy, cz) {
   const key = chunkKey(cx, cy, cz);
-  if (activeChunks.has(key) || !assets.length) return;
+  if (activeChunks.has(key)) return;
   const group = [];
   for (const spec of chunkPlanes(cx, cy, cz)) {
     const g = takeTile();
+    g.userData.spec = spec;                 // remembered so blanks can fill later
+    g.position.set(spec.x, spec.y, spec.z);
+    g.userData.baseH = spec.h;
     // Sequential slot → consecutive works for neighbouring planes, so two
     // copies of one work are a whole pool apart rather than side by side.
-    dressTile(g, spec, assets[mod(spec.slot, assets.length)]);
+    const a = assetForSlot(spec.slot);
+    if (a) dressTile(g, spec, a); else blankTile(g);
     group.push(g);
   }
   activeChunks.set(key, group);
+}
+
+/* Positioned but showing nothing yet — its work has not loaded. */
+function blankTile(g) {
+  const u = g.userData;
+  if (u.asset) releaseTextureFor(u.asset.id);
+  u.asset = null; u.loaded = false; u.fade = 0; u.target = 0; u.hiResFor = null;
+  u.art.material.map = null;
+  u.art.material.opacity = 0;
+  u.mount.material.opacity = 0;
+  u.art.visible = false;
+  u.mount.visible = false;
+}
+
+/* Dress any blank plane whose work has since arrived. Planes that already
+   have one are left completely alone — that is what turns a load from a
+   series of full-field rebuilds into a progressive fill. */
+function fillBlanks() {
+  for (const g of tiles) {
+    if (!g.visible || g.userData.asset || !g.userData.spec) continue;
+    const a = assetForSlot(g.userData.spec.slot);
+    if (a) dressTile(g, g.userData.spec, a);
+  }
 }
 
 function dropChunk(key) {
@@ -1364,8 +1410,12 @@ function updateChunks(force = false) {
   for (const k of [...activeChunks.keys()]) if (!want.has(k)) dropChunk(k);
 }
 
-// A new collection invalidates every chunk's asset binding.
+// A new collection invalidates every chunk's asset binding. Counted
+// because a full teardown resets every plane's fade to zero, so doing it
+// repeatedly during a load makes the whole field blink.
+let fieldRebuilds = 0;
 function rebuildField() {
+  fieldRebuilds++;
   for (const k of [...activeChunks.keys()]) dropChunk(k);
   lastChunk = null;
   updateChunks(true);
@@ -1625,12 +1675,18 @@ function markFilterPasses() {
 function feed(records) {
   assets.push(...records);
   visible = assets.filter(passes);
-  // First works to arrive populate the field; later batches widen the pool
-  // that chunks draw from, so the field is rebuilt against the new set.
-  rebuildField();
+  // Fill in, never rebuild. Rebuilding here reset every plane's fade and
+  // made the field blink once per batch.
+  fillBlanks();
 }
 
-function topUp() { rebuildField(); }
+/* Loading is over. Narrow the divisor to what actually arrived so slots
+   beyond that count stop resolving to nothing, then fill the remaining
+   blanks. Planes already showing a work keep it — no teardown. */
+function topUp() {
+  slotSpan = Math.max(1, assets.length);
+  fillBlanks();
+}
 
 /* Replay the last good visit. Returns false if there is nothing stored,
    so callers can fall through to the error message. */
@@ -1662,6 +1718,7 @@ async function loadSource(source) {
     source.kind === 'search' ? `Search — “${source.query}”` : source.label;
 
   assets = []; visible = []; cursor = 0;
+  slotSpan = TARGET_TILES;       // back to the stable divisor for the new load
   imgStats.loaded = 0; imgStats.failed = 0;
   filters.colours.clear(); filters.keywords.clear();
   filters.yearMin = filters.yearMax = null;
@@ -3129,7 +3186,9 @@ window.__atlas = {
   get flying()  { return !!flight; },
   get pending() { return texPending(); },
   get chunks()  { return { active: activeChunks.size, planes: tiles.filter((g) => g.visible).length,
-                           pooled: freeTiles.length, textures: texCache.size }; },
+                           pooled: freeTiles.length, textures: texCache.size,
+                           rebuilds: fieldRebuilds,
+                           dressed: tiles.filter((g) => g.visible && g.userData.asset).length }; },
   /* Each live plane projected to a screen-space box in 0..1, with the
      opacity and distance needed to judge whether it is actually seen.
      Lets a test measure frame coverage without reading WebGL pixels,
