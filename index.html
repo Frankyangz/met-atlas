@@ -309,6 +309,35 @@
 
   .group-label { font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
                  color: var(--ink-faint); margin: 4px 0 9px; }
+  /* ─── import photos ────────────────────────────────────────────────── */
+  #upload-box { padding: 12px 13px; border: 1px dashed var(--line-firm);
+                border-radius: 10px; background: rgba(255,255,255,0.4); }
+  .up-row { display: flex; flex-wrap: wrap; gap: 7px; }
+  .up-btn {
+    height: 32px; padding: 0 13px; border-radius: 8px;
+    border: 1px solid var(--line-firm); background: #fff;
+    font-size: 12px; transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .up-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .up-btn.ghost { background: none; color: var(--ink-faint); }
+  .up-note { margin-top: 9px; font-size: 11px; line-height: 1.6; color: var(--ink-faint); }
+  .up-note b { color: var(--ink-soft); font-weight: 500; }
+
+  /* Full-window drop target. Only shown while something is being dragged
+     over the page, so it never sits in the way. */
+  #drop-veil {
+    position: fixed; inset: 0; z-index: 60; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(222, 214, 200, 0.86); backdrop-filter: blur(4px);
+  }
+  #drop-veil.on { display: flex; }
+  #drop-veil .dv-card {
+    padding: 34px 46px; border: 2px dashed var(--accent); border-radius: 16px;
+    background: var(--paper); text-align: center;
+  }
+  #drop-veil .dv-t { font-family: var(--serif); font-size: 20px; }
+  #drop-veil .dv-s { margin-top: 6px; font-size: 12px; color: var(--ink-faint); }
+
   .dept-grid { display: grid; gap: 7px;
                grid-template-columns: repeat(auto-fill, minmax(228px, 1fr)); }
   .dept-card {
@@ -574,6 +603,13 @@
   <div class="gg-item" data-g="heart"><b>Heart</b><span>both hands · star it</span></div>
 </div>
 
+<div id="drop-veil">
+  <div class="dv-card">
+    <div class="dv-t">Drop photos to explore them</div>
+    <div class="dv-s">They stay in your browser · nothing is uploaded</div>
+  </div>
+</div>
+
 <!-- ── Gallery sound player ────────────────────────────────────────── -->
 <div id="music-panel">
   <div class="mp-head">
@@ -646,7 +682,24 @@
         <input id="search-input" type="text" placeholder="Search the collection — “Monet”, “armor”, “kimono”…" />
         <button id="search-go">Search</button>
       </div>
-      <div class="group-label">Survey</div>
+      <div class="group-label">Your photos</div>
+      <div id="upload-box">
+        <div class="up-row">
+          <button class="up-btn" id="up-files">Choose photos…</button>
+          <button class="up-btn" id="up-folder">Choose a folder…</button>
+          <button class="up-btn" id="up-open" style="display:none">Open in the field</button>
+          <button class="up-btn ghost" id="up-clear" style="display:none">Clear</button>
+        </div>
+        <div class="up-note" id="up-note">
+          Or drag images anywhere onto the page.
+          <b>Nothing is uploaded</b> — photos stay in your browser and are
+          cleared when you leave. Around 40 works best.
+        </div>
+      </div>
+      <input type="file" id="up-input" accept="image/*" multiple hidden />
+      <input type="file" id="up-dir" accept="image/*" multiple webkitdirectory hidden />
+
+      <div class="group-label" style="margin-top:18px">Survey</div>
       <div class="dept-grid" id="survey-grid"></div>
       <div class="group-label" style="margin-top:18px">Departments</div>
       <div class="dept-grid" id="dept-grid"></div>
@@ -821,8 +874,16 @@ const SURVEYS = [
     sub: 'Egypt, Greece & Rome, West Asia' },
 ];
 
+/* Blob and data URLs skip the proxy entirely. They are already on this
+   origin, so they are CORS-clean by definition — sending them through a
+   remote resizer would be both broken (the proxy cannot resolve a blob
+   URL) and pointless. This is why imported photos need no proxy hop and
+   why pixel readback for colour extraction works on them directly. */
+const isLocalURL = (u) => u.startsWith('blob:') || u.startsWith('data:');
+
 const proxied = (url, w = 820) =>
-  (!url || url.startsWith(PROXY)) ? url : PROXY + encodeURIComponent(url) + '&w=' + w;
+  (!url || url.startsWith(PROXY) || isLocalURL(url))
+    ? url : PROXY + encodeURIComponent(url) + '&w=' + w;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -993,6 +1054,121 @@ function normalise(o) {
       recordUrl:     o.objectURL || '',
     },
   };
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   Imported photos — session only
+
+   Nothing is uploaded. Files are read off disk into memory, downscaled,
+   and handed to WebGL as blob URLs on this origin. No server sees them,
+   and because a blob URL dies with the document, a refresh clears them.
+
+   Downscaling is not an optimisation, it is the difference between
+   working and not: fifty 4000px photos held at full size is roughly
+   200 MB of texture memory. At 560px it is about a tenth of that.
+   ══════════════════════════════════════════════════════════════════════ */
+const UP_THUMB   = 560;    // field texture
+const UP_FULL    = 1600;   // focus view
+const UP_BATCH   = 4;      // decodes in flight — more than this janks the UI
+
+let uploaded = [];         // survives source switches for the session
+let uploadSeq = 0;
+
+/* Ids must not repeat across sessions. Without this token a photo starred
+   as `up_1` last visit would collide with a completely different `up_1`
+   this visit, and the starred rail would silently show the wrong image. */
+const UP_SESSION = Math.random().toString(36).slice(2, 8);
+
+// Is this record's blob still alive, i.e. imported in *this* session?
+const isUploadLive = (a) => !a.local || uploaded.some((u) => u.id === a.id);
+
+/* Longest edge to `maxEdge`, never upscaling. Returns a blob URL. */
+async function downscaleToURL(bmp, maxEdge, quality) {
+  const s = Math.min(1, maxEdge / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * s));
+  const h = Math.max(1, Math.round(bmp.height * s));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', quality));
+  return blob ? URL.createObjectURL(blob) : null;
+}
+
+/* One file → the same normalised shape every other source produces, so
+   the field, filters, clustering and focus view need no special cases.
+   Metadata is thin by nature: filename, file date, pixel size. EXIF would
+   give real capture dates and camera info but needs a parser. */
+async function importOne(file) {
+  const bmp = await createImageBitmap(file);
+  try {
+    const [thumb, image] = await Promise.all([
+      downscaleToURL(bmp, UP_THUMB, 0.82),
+      downscaleToURL(bmp, UP_FULL, 0.88),
+    ]);
+    if (!thumb) return null;
+
+    const when = new Date(file.lastModified || Date.now());
+    return {
+      id: `up_${UP_SESSION}_${++uploadSeq}`,
+      local: true,
+      title: file.name.replace(/\.[^.]+$/, '') || 'Untitled',
+      thumb,
+      image: image || thumb,
+      meta: {
+        creator: '', creatorBio: '', nationality: '',
+        dateText: when.toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }),
+        year: when.getFullYear(),
+        medium: `${bmp.width} × ${bmp.height} px`,
+        dimensions: '', objectName: '',
+        department: 'My Photos', classification: '', culture: '', period: '',
+        tags: [],
+        creditLine: '', accession: '', gallery: '', isOnView: false,
+        isHighlight: false,
+        recordUrl: '',           // no external record — the link stays hidden
+      },
+    };
+  } finally {
+    bmp.close();               // release the decoded original either way
+  }
+}
+
+async function importFiles(fileList) {
+  const files = [...fileList].filter((f) => /^image\//.test(f.type));
+  if (!files.length) { setUploadNote('No images in that selection.'); return; }
+
+  loadState.phase = 'importing';
+  loadState.found = 0;
+  refreshStatus();
+
+  const added = [];
+  for (let i = 0; i < files.length; i += UP_BATCH) {
+    const part = await Promise.all(
+      files.slice(i, i + UP_BATCH).map((f) => importOne(f).catch(() => null)));
+    for (const rec of part) if (rec) added.push(rec);
+    loadState.found = added.length;
+    loadState.total = files.length;
+    refreshStatus();
+    await sleep(0);            // yield so the status line actually paints
+  }
+
+  uploaded.push(...added);
+  syncUploadUI();
+
+  const skipped = files.length - added.length;
+  setUploadNote(skipped ? `${added.length} added, ${skipped} could not be read.`
+                        : `${added.length} photo${added.length === 1 ? '' : 's'} ready.`);
+
+  loadSource({ kind: 'uploads', id: 'uploads', label: 'My Photos' });
+}
+
+function clearUploads() {
+  for (const a of uploaded) {
+    if (a.thumb) URL.revokeObjectURL(a.thumb);
+    if (a.image && a.image !== a.thumb) URL.revokeObjectURL(a.image);
+  }
+  uploaded = [];
+  syncUploadUI();
+  setUploadNote('Cleared.');
 }
 
 function shuffle(a) {
@@ -1582,6 +1758,10 @@ function refreshStatus() {
   // useful thing to say is what you are looking at, not that we are waiting.
   if (loadState.phase === 'fallback') { status(loadState.message, { spin: false }); return; }
   if (isThrottled()) { status('The Met is rate-limiting — easing off…'); return; }
+  if (loadState.phase === 'importing') {
+    status(`Reading your photos — ${loadState.found} of ${loadState.total || '…'}`);
+    return;
+  }
   if (loadState.phase === 'ids')   { status('Consulting the collection…'); return; }
   if (loadState.phase === 'error') { status(loadState.message, { spin: false }); return; }
 
@@ -1733,6 +1913,27 @@ async function loadSource(source) {
   // batch rebuilds it.
   for (const k of [...activeChunks.keys()]) dropChunk(k);
   lastChunk = null;
+
+  /* Imported photos are already in memory — no ids to fetch, no N+1, no
+     WAF, no proxy. The entire network path below is skipped and the field
+     fills in one pass. */
+  if (source.kind === 'uploads') {
+    if (!uploaded.length) {
+      loadState.phase = 'error';
+      loadState.message = 'No photos imported yet.';
+      refreshStatus();
+      return;
+    }
+    feed(uploaded.slice());
+    topUp();
+    loadState.phase = 'done';
+    loadState.found = uploaded.length;
+    rebuildFacets();
+    applyFilters({ repopulate: false });
+    refreshStatus();
+    showHint();
+    return;
+  }
 
   loadState.phase = 'ids'; loadState.found = 0;
   refreshStatus();
@@ -2343,7 +2544,27 @@ const setStarOrder = (ids) => {
 // delete, so an un-starred work still answers has() until it is evicted.
 const isStarred = (asset) => starOrder().some((i) => String(i) === String(asset.id));
 
-function toggleStar(asset) {
+/* A small embedded JPEG, ~4 KB. Only ever made for imported photos:
+   museum works keep a remote URL that still resolves next visit, and
+   embedding 300 of these would eat most of the localStorage budget. */
+async function makeTinyThumb(url, edge = 96) {
+  try {
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = url;
+    });
+    const s = Math.min(1, edge / Math.max(img.width, img.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.width * s));
+    c.height = Math.max(1, Math.round(img.height * s));
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.72);
+  } catch { return null; }
+}
+
+async function toggleStar(asset) {
   const ids = starOrder();
   if (isStarred(asset)) {
     starStore.set(asset.id, undefined);
@@ -2351,7 +2572,13 @@ function toggleStar(asset) {
     // what renderStarred iterates.
     setStarOrder(ids.filter((i) => String(i) !== String(asset.id)));
   } else {
-    starStore.set(asset.id, asset);
+    const rec = { ...asset };
+    /* An imported photo's blob URL dies with the document, so next visit
+       the rail would show a broken image. Embedding a thumbnail keeps the
+       entry recognisable. The full photo is genuinely gone until it is
+       imported again — the rail says so rather than pretending. */
+    if (asset.local) rec.thumbData = await makeTinyThumb(asset.thumb);
+    starStore.set(asset.id, rec);
     setStarOrder([String(asset.id), ...ids.filter((i) => String(i) !== String(asset.id))]);
   }
   syncStar(asset);
@@ -2372,6 +2599,16 @@ document.getElementById('focus-star').addEventListener('click', () => {
    placed ahead of the camera, so the flight still reads as travel rather
    than a jump cut. */
 function summon(asset) {
+  // An imported photo from a previous session has no pixels left to show.
+  // Say so plainly instead of flying to a blank plane.
+  if (!isUploadLive(asset)) {
+    togglePanel('bookmarks', false);
+    loadState.phase = 'error';
+    loadState.message = 'That photo was from an earlier session — import it again to view it.';
+    refreshStatus();
+    return;
+  }
+
   const live = tiles.filter((g) => g.visible && g.userData.asset);
   let tile = live.find((g) => String(g.userData.asset.id) === String(asset.id));
 
@@ -2414,14 +2651,19 @@ function renderStarred() {
 
     const btn = document.createElement('button');
     btn.className = 'bm';
+    const live = isUploadLive(a);
     const img = document.createElement('img');
-    img.src = proxied(a.thumb, 120);
+    // A dead blob falls back to the thumbnail embedded when it was starred.
+    img.src = live ? proxied(a.thumb, 120) : (a.thumbData || '');
     img.alt = '';
+    if (!live) img.style.opacity = '0.55';
     const txt = document.createElement('div');
     txt.style.minWidth = '0';
     const t = document.createElement('div'); t.className = 'bm-t'; t.textContent = a.title;
     const s = document.createElement('div'); s.className = 'bm-s';
-    s.textContent = [a.meta.creator, a.meta.dateText].filter(Boolean).join(' · ');
+    s.textContent = live
+      ? [a.meta.creator, a.meta.dateText].filter(Boolean).join(' · ')
+      : 'From an earlier session — import again to view';
     txt.append(t, s);
     btn.append(img, txt);
     btn.addEventListener('click', () => summon(a));
@@ -2519,6 +2761,69 @@ async function buildBrowser() {
                    label: d.displayName })));
   }
 }
+
+/* ── Import controls ─────────────────────────────────────────────────── */
+const upNote = document.getElementById('up-note');
+const upDefaultNote = upNote.innerHTML;
+
+function setUploadNote(msg) {
+  upNote.textContent = msg;
+  clearTimeout(setUploadNote._t);
+  setUploadNote._t = setTimeout(() => { upNote.innerHTML = upDefaultNote; }, 6000);
+}
+
+function syncUploadUI() {
+  const n = uploaded.length;
+  document.getElementById('up-open').style.display = n ? '' : 'none';
+  document.getElementById('up-clear').style.display = n ? '' : 'none';
+  document.getElementById('up-files').textContent = n ? 'Add more…' : 'Choose photos…';
+  document.getElementById('up-open').textContent = `Open ${n} in the field`;
+}
+
+for (const [btnId, inputId] of [['up-files', 'up-input'], ['up-folder', 'up-dir']]) {
+  document.getElementById(btnId).addEventListener('click', () =>
+    document.getElementById(inputId).click());
+}
+for (const id of ['up-input', 'up-dir']) {
+  document.getElementById(id).addEventListener('change', (e) => {
+    if (e.target.files && e.target.files.length) {
+      togglePanel('browser-veil', false);
+      importFiles(e.target.files);
+    }
+    e.target.value = '';        // re-selecting the same files must re-fire
+  });
+}
+document.getElementById('up-open').addEventListener('click', () => {
+  togglePanel('browser-veil', false);
+  loadSource({ kind: 'uploads', id: 'uploads', label: 'My Photos' });
+});
+document.getElementById('up-clear').addEventListener('click', clearUploads);
+
+/* Drag and drop anywhere. dragenter/dragleave fire constantly as the
+   pointer crosses child elements, so the veil is driven by a depth
+   counter rather than the raw events — otherwise it strobes. */
+const dropVeil = document.getElementById('drop-veil');
+let dragDepth = 0;
+const hasFiles = (e) => e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+
+addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  if (++dragDepth === 1) dropVeil.classList.add('on');
+});
+addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return;
+  if (--dragDepth <= 0) { dragDepth = 0; dropVeil.classList.remove('on'); }
+});
+addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  dropVeil.classList.remove('on');
+  togglePanel('browser-veil', false);
+  importFiles(e.dataTransfer.files);
+});
 
 function runSearch() {
   const q = document.getElementById('search-input').value.trim();
@@ -3185,6 +3490,8 @@ window.__atlas = {
   get focused() { return focused ? focused.title : null; },
   get flying()  { return !!flight; },
   get pending() { return texPending(); },
+  get assets()  { return assets; },
+  get uploads() { return { count: uploaded.length, session: UP_SESSION }; },
   get chunks()  { return { active: activeChunks.size, planes: tiles.filter((g) => g.visible).length,
                            pooled: freeTiles.length, textures: texCache.size,
                            rebuilds: fieldRebuilds,
@@ -3305,6 +3612,7 @@ window.__atlas = {
 for (let i = 0; i < CHUNK_OFFSETS.length * PLANES_PER_CHUNK; i++) freeTiles.push(makeTile());
 renderClusterOpts();
 renderStarred();
+syncUploadUI();
 tick();
 buildBrowser();
 loadSource(currentSource);
